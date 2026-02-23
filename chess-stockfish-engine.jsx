@@ -285,6 +285,28 @@ function uciToMove(uci,bd,col,ep){
 }
 
 // ═══════════════════════════════════════════════════
+// REVIEW / ANALYSIS HELPERS
+// ═══════════════════════════════════════════════════
+const GRADE_INFO={
+  best:      {label:'최고',   sym:'⭐',color:'#3cdc82'},
+  excellent: {label:'우수함', sym:'👍',color:'#89d4f0'},
+  good:      {label:'좋음',   sym:'✓', color:'#6abf69'},
+  inaccuracy:{label:'부정확', sym:'?!',color:'#f0c040'},
+  mistake:   {label:'실수',   sym:'?', color:'#e8a040'},
+  blunder:   {label:'블런더', sym:'??',color:'#e05050'},
+};
+function classifyMove(cpLoss){
+  if(cpLoss<=0)return'best';if(cpLoss<=10)return'excellent';
+  if(cpLoss<=25)return'good';if(cpLoss<=50)return'inaccuracy';
+  if(cpLoss<=100)return'mistake';return'blunder';
+}
+function calcAccuracy(moves){
+  if(!moves.length)return'–';
+  const s=moves.reduce((a,m)=>a+Math.max(0,103.1668*Math.exp(-0.04354*Math.sqrt(Math.max(0,m.cpLoss)))-3.1668),0);
+  return(Math.round(s/moves.length*10)/10).toFixed(1);
+}
+
+// ═══════════════════════════════════════════════════
 // REACT COMPONENT
 // ═══════════════════════════════════════════════════
 export default function ChessEngine(){
@@ -310,6 +332,11 @@ export default function ChessEngine(){
   const[gameKey,setGameKey]=useState(0);
   const[hintMove,setHintMove]=useState(null);
   const[hintThinking,setHintThinking]=useState(false);
+  const[analysisEvals,setAnalysisEvals]=useState([]);
+  const[moveClassifications,setMoveClassifications]=useState([]);
+  const[analyzing,setAnalyzing]=useState(false);
+  const[analysisProgress,setAnalysisProgress]=useState({current:0,total:0});
+  const[reviewMode,setReviewMode]=useState(false);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -321,6 +348,7 @@ export default function ChessEngine(){
   const oR=useRef(over);oR.current=over;
   const capWR=useRef(capW);capWR.current=capW;
   const capBR=useRef(capB);capBR.current=capB;
+  const analysisAbortRef=useRef(false);
 
   // Stockfish worker refs (engine state, not React state)
   const sfWorkerRef=useRef(null);
@@ -367,6 +395,9 @@ export default function ChessEngine(){
     setPromo(null);setPc(p);setEvalScore(null);setSearchInfo('');
     setHistStates([{board:initB,turn:'w',ep:null,cas:'KQkq',last:null,capW:[],capB:[]}]);
     setViewIdx(null);setHintMove(null);setHintThinking(false);
+    analysisAbortRef.current=true;
+    setAnalysisEvals([]);setMoveClassifications([]);setAnalyzing(false);
+    setAnalysisProgress({current:0,total:0});setReviewMode(false);
     setGameKey(k=>k+1);
   },[]);
 
@@ -481,6 +512,79 @@ export default function ChessEngine(){
     setPromo(null);setHintMove(null);setEvalScore(null);setSearchInfo('');
     setViewIdx(null);
   },[thinking,histStates,viewIdx]);
+
+  const runAnalysis=useCallback(()=>{
+    if(analyzing||histStates.length<2)return;
+    analysisAbortRef.current=false;
+    setAnalyzing(true);setReviewMode(false);
+    const total=histStates.length;
+    setAnalysisProgress({current:0,total});
+    const evals=new Array(total).fill(null);
+    let idx=0;
+    const next=()=>{
+      if(analysisAbortRef.current){setAnalyzing(false);return;}
+      if(idx>=total){
+        const cls=[];
+        for(let i=0;i<total-1;i++){
+          const t=histStates[i].turn;
+          const ei=evals[i]??0,ei1=evals[i+1]??0;
+          const cpLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
+          cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
+        }
+        setAnalysisEvals([...evals]);setMoveClassifications(cls);
+        setAnalyzing(false);setReviewMode(true);
+        return;
+      }
+      const s=histStates[idx];
+      setAnalysisProgress({current:idx+1,total});
+      if(sfReadyRef.current&&sfWorkerRef.current){
+        sfCallbackRef.current=(uciMove,sfEval)=>{
+          if(analysisAbortRef.current){setAnalyzing(false);return;}
+          evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
+          idx++;next();
+        };
+        sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+        sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
+        sfWorkerRef.current.postMessage(`go depth 15 movetime 800`);
+      }else{
+        const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
+        evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
+        idx++;next();
+      }
+    };
+    next();
+  },[analyzing,histStates]);
+
+  const renderEvalGraph=()=>{
+    if(analysisEvals.length<2)return null;
+    const W=400,H=72,MAXE=600,n=analysisEvals.length;
+    const xS=i=>Math.round((i/(n-1))*W);
+    const yS=e=>{const c=Math.max(-MAXE,Math.min(MAXE,e??0));return Math.round(H/2-(c/MAXE)*(H/2-4));};
+    const pts=analysisEvals.map((e,i)=>[xS(i),yS(e)]);
+    const line=pts.map(([x,y],i)=>`${i===0?'M':'L'}${x} ${y}`).join(' ');
+    const area=`${line} L${xS(n-1)} ${H/2} L${xS(0)} ${H/2}Z`;
+    const GCOL={best:'#3cdc82',excellent:'#89d4f0',good:'#6abf69',inaccuracy:'#f0c040',mistake:'#e8a040',blunder:'#e05050'};
+    return(
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:'block',borderRadius:4}} preserveAspectRatio="none">
+        <defs>
+          <clipPath id="clip-top"><rect x={0} y={0} width={W} height={H/2}/></clipPath>
+          <clipPath id="clip-bot"><rect x={0} y={H/2} width={W} height={H/2}/></clipPath>
+        </defs>
+        <rect width={W} height={H} fill="#16213e"/>
+        <path d={area} fill="rgba(232,224,208,0.45)" clipPath="url(#clip-top)"/>
+        <path d={area} fill="rgba(15,15,35,0.65)" clipPath="url(#clip-bot)"/>
+        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(255,255,255,0.18)" strokeWidth={0.5}/>
+        <path d={line} fill="none" stroke="rgba(200,180,140,0.7)" strokeWidth={1}/>
+        {moveClassifications.map((mc,i)=>{
+          const x=xS(i+1),y=yS(analysisEvals[i+1]);
+          return<circle key={i} cx={x} cy={y} r={3} fill={GCOL[mc.grade]||'#888'} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}/>;
+        })}
+        {effectiveIdx>=0&&effectiveIdx<n&&(
+          <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="rgba(255,200,0,0.6)" strokeWidth={1} strokeDasharray="2,2"/>
+        )}
+      </svg>
+    );
+  };
 
   const chk=!over&&inChk(board,turn);
 
@@ -643,18 +747,36 @@ export default function ChessEngine(){
       </div>
 
       {/* Status */}
-      <div style={{marginTop:8,fontSize:13,fontWeight:500,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'center'}}>
-        {over?(
-          <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.2)',borderRadius:8,padding:'6px 14px'}}>
-            <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
-            <button onClick={()=>reset()} style={{padding:'4px 12px',background:'#e8d5b5',color:'#1a1a2e',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>Play Again</button>
+      <div style={{marginTop:8,fontSize:13,fontWeight:500,display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'center'}}>
+          {over?(
+            <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.2)',borderRadius:8,padding:'6px 14px'}}>
+              <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
+              <button onClick={()=>reset()} style={{padding:'4px 12px',background:'#e8d5b5',color:'#1a1a2e',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>Play Again</button>
+            </div>
+          ):thinking?(
+            <><span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040'}}>AI thinking...</span></>
+          ):chk?(
+            <span style={{color:'#e74c3c'}}>Check!</span>
+          ):(
+            <span style={{color:'#888'}}>{turn==='w'?'White':'Black'} to move</span>
+          )}
+        </div>
+        {over&&!analyzing&&!reviewMode&&hist.length>1&&(
+          <button onClick={runAnalysis}
+            style={{padding:'6px 20px',background:'linear-gradient(135deg,#2a6e4a,#1a4a30)',color:'#7ef0b0',border:'1px solid rgba(60,220,130,0.3)',borderRadius:8,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",letterSpacing:0.5}}>
+            📊 리뷰 시작
+          </button>
+        )}
+        {analyzing&&(
+          <div style={{width:'min(84vw,400px)',textAlign:'center'}}>
+            <div style={{fontSize:11,color:'#e8a040',marginBottom:4,fontFamily:"'Space Mono',monospace"}}>
+              분석 중... {analysisProgress.current}/{analysisProgress.total}
+            </div>
+            <div style={{height:4,background:'rgba(255,255,255,0.08)',borderRadius:2}}>
+              <div style={{height:'100%',background:'#e8a040',borderRadius:2,transition:'width 0.3s',width:`${analysisProgress.total?Math.round(analysisProgress.current/analysisProgress.total*100):0}%`}}/>
+            </div>
           </div>
-        ):thinking?(
-          <><span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040'}}>AI thinking...</span></>
-        ):chk?(
-          <span style={{color:'#e74c3c'}}>Check!</span>
-        ):(
-          <span style={{color:'#888'}}>{turn==='w'?'White':'Black'} to move</span>
         )}
       </div>
       {searchInfo&&<div style={{fontSize:9,color:'#555',marginTop:2,fontFamily:"'Space Mono',monospace"}}>{searchInfo}</div>}
@@ -686,13 +808,60 @@ export default function ChessEngine(){
             {!isLive&&<span style={{fontSize:10,color:'#f0c040',fontFamily:"'Space Mono',monospace",marginLeft:2}}>복기 중</span>}
           </div>
           <div style={{maxHeight:64,overflowY:'auto',background:'rgba(255,255,255,0.04)',borderRadius:6,padding:'6px 10px',display:'flex',flexWrap:'wrap',gap:'3px 8px',fontSize:11,fontFamily:"'Space Mono',monospace"}}>
-            {hist.map((m,i)=>(
-              <span key={i} onClick={()=>setViewIdx(i+1)}
-                style={{color:i===activeHistIdx?'#f0c040':i%2===0?'#e8d5b5':'#8aa8d5',cursor:'pointer',fontWeight:i===activeHistIdx?700:400,textDecoration:i===activeHistIdx?'underline':'none'}}>
-                {i%2===0?`${Math.floor(i/2)+1}. `:''}{m}
-              </span>))}
+            {hist.map((m,i)=>{
+              const mc=moveClassifications[i];const gi=mc?GRADE_INFO[mc.grade]:null;
+              return(
+                <span key={i} onClick={()=>setViewIdx(i+1)}
+                  style={{color:i===activeHistIdx?'#f0c040':i%2===0?'#e8d5b5':'#8aa8d5',cursor:'pointer',fontWeight:i===activeHistIdx?700:400,textDecoration:i===activeHistIdx?'underline':'none',display:'inline-flex',alignItems:'center',gap:2}}>
+                  {i%2===0?`${Math.floor(i/2)+1}. `:''}{m}{gi&&<span title={gi.label} style={{fontSize:9,color:gi.color,lineHeight:1}}>{gi.sym}</span>}
+                </span>
+              );
+            })}
           </div>
         </div>)}
+
+      {/* Review panel */}
+      {reviewMode&&(
+        <div style={{marginTop:12,width:'min(88vw,420px)',background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'14px 16px',border:'1px solid rgba(255,255,255,0.08)'}}>
+          <div style={{fontSize:13,fontWeight:700,color:'#e8d5b5',marginBottom:10,fontFamily:"'Space Mono',monospace",letterSpacing:1}}>📊 수 분석</div>
+          {/* Eval graph */}
+          <div style={{marginBottom:12,borderRadius:6,overflow:'hidden'}}>
+            {renderEvalGraph()}
+          </div>
+          {/* Accuracy scores */}
+          <div style={{display:'flex',gap:10,marginBottom:12}}>
+            {[['w',pc==='w'?'You':'AI'],['b',pc==='b'?'You':'AI']].map(([color,label])=>{
+              const moves=moveClassifications.filter(m=>m.player===color);
+              const acc=calcAccuracy(moves);
+              return(
+                <div key={color} style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:8,padding:'10px 12px',textAlign:'center',border:'1px solid rgba(255,255,255,0.06)'}}>
+                  <div style={{fontSize:9,color:'#777',marginBottom:3,textTransform:'uppercase',letterSpacing:0.5}}>{label} ({color==='w'?'백':'흑'})</div>
+                  <div style={{fontSize:26,fontWeight:700,color:'#e8d5b5',fontFamily:"'Space Mono',monospace",lineHeight:1}}>{acc}</div>
+                  <div style={{fontSize:9,color:'#666',marginTop:2}}>정확도 %</div>
+                </div>
+              );
+            })}
+          </div>
+          {/* Grade breakdown */}
+          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:5}}>
+            {Object.entries(GRADE_INFO).map(([key,gi])=>{
+              const wC=moveClassifications.filter(m=>m.player==='w'&&m.grade===key).length;
+              const bC=moveClassifications.filter(m=>m.player==='b'&&m.grade===key).length;
+              if(!wC&&!bC)return null;
+              return(
+                <div key={key} style={{display:'flex',alignItems:'center',gap:6,background:'rgba(255,255,255,0.03)',borderRadius:6,padding:'5px 8px',border:`1px solid ${gi.color}33`}}>
+                  <span style={{fontSize:13,width:20,textAlign:'center',flexShrink:0}}>{gi.sym}</span>
+                  <div style={{flex:1,fontSize:10,color:gi.color,fontWeight:700}}>{gi.label}</div>
+                  <div style={{display:'flex',gap:3,fontSize:11,fontFamily:"'Space Mono',monospace"}}>
+                    <span title="백" style={{color:'#e8d5b5',background:'rgba(232,224,208,0.1)',borderRadius:3,padding:'1px 5px'}}>{wC}</span>
+                    <span title="흑" style={{color:'#8aa8d5',background:'rgba(138,168,213,0.1)',borderRadius:3,padding:'1px 5px'}}>{bC}</span>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
 
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
