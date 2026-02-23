@@ -305,6 +305,11 @@ export default function ChessEngine(){
   const[pc,setPc]=useState('w');
   const[evalScore,setEvalScore]=useState(null);
   const[searchInfo,setSearchInfo]=useState('');
+  const[histStates,setHistStates]=useState(()=>[{board:initBoard(),turn:'w',ep:null,cas:'KQkq',last:null,capW:[],capB:[]}]);
+  const[viewIdx,setViewIdx]=useState(null);
+  const[gameKey,setGameKey]=useState(0);
+  const[hintMove,setHintMove]=useState(null);
+  const[hintThinking,setHintThinking]=useState(false);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -314,6 +319,8 @@ export default function ChessEngine(){
   const dR=useRef(di);dR.current=di;
   const thR=useRef(thinking);thR.current=thinking;
   const oR=useRef(over);oR.current=over;
+  const capWR=useRef(capW);capWR.current=capW;
+  const capBR=useRef(capB);capBR.current=capB;
 
   // Stockfish worker refs (engine state, not React state)
   const sfWorkerRef=useRef(null);
@@ -331,17 +338,14 @@ export default function ChessEngine(){
       sfWorkerRef.current=w;
       w.onmessage=(e)=>{
         const line=typeof e.data==='string'?e.data:String(e.data);
-        // UCI handshake
         if(line==='uciok'){w.postMessage('isready');}
         if(line==='readyok'){sfReadyRef.current=true;}
-        // Capture latest eval from info lines (centipawns, side-to-move perspective)
         if(line.startsWith('info')&&line.includes('score')){
           const cp=line.match(/score cp (-?\d+)/);
           const mt=line.match(/score mate (-?\d+)/);
           if(cp)sfEvalRef.current=parseInt(cp[1]);
           else if(mt)sfEvalRef.current=parseInt(mt[1])>0?99999:-99999;
         }
-        // bestmove response → fire the pending callback
         if(line.startsWith('bestmove')&&sfCallbackRef.current){
           const bm=line.split(' ')[1];
           sfCallbackRef.current(bm,sfEvalRef.current);
@@ -357,18 +361,26 @@ export default function ChessEngine(){
 
   const reset=useCallback((npc)=>{
     const p=npc!==undefined?npc:pR.current;
-    setBoard(initBoard());setTurn('w');setSel(null);setLm([]);setEp(null);setCas('KQkq');
+    const initB=initBoard();
+    setBoard(initB);setTurn('w');setSel(null);setLm([]);setEp(null);setCas('KQkq');
     setOver(null);setThinking(false);setLast(null);setCapW([]);setCapB([]);setHist([]);
     setPromo(null);setPc(p);setEvalScore(null);setSearchInfo('');
+    setHistStates([{board:initB,turn:'w',ep:null,cas:'KQkq',last:null,capW:[],capB:[]}]);
+    setViewIdx(null);setHintMove(null);setHintThinking(false);
+    setGameKey(k=>k+1);
   },[]);
 
   const applyMv=useCallback((b,m,ep_,cas_,col)=>{
     const cap=b[m.t];const nb=doMv(b,m);const nc=updCas(cas_,m,b);const ne=nextEp(m);
+    const nx=col==='w'?'b':'w';
+    const newCapW=[...capWR.current,...(cap&&isW(cap)?[cap]:[]),...(m.ep&&col==='b'?[WP]:[])];
+    const newCapB=[...capBR.current,...(cap&&isB(cap)?[cap]:[]),...(m.ep&&col==='w'?[BP]:[])];
     setBoard(nb);setCas(nc);setEp(ne);setLast({f:m.f,t:m.t});
-    if(cap){if(isW(cap))setCapW(p=>[...p,cap]);else setCapB(p=>[...p,cap])}
-    if(m.ep){if(col==='w')setCapB(p=>[...p,BP]);else setCapW(p=>[...p,WP])}
+    setCapW(newCapW);setCapB(newCapB);
     setHist(p=>[...p,`${SYM[b[m.f]]||''}${FL[m.f&7]}${RL[m.f>>3]}→${FL[m.t&7]}${RL[m.t>>3]}`]);
-    const nx=col==='w'?'b':'w';setTurn(nx);
+    setHistStates(p=>[...p,{board:nb,turn:nx,ep:ne,cas:nc,last:{f:m.f,t:m.t},capW:newCapW,capB:newCapB}]);
+    setViewIdx(null);setHintMove(null);
+    setTurn(nx);
     if(!legal(nb,nx,ne,nc).length){if(inChk(nb,nx))setOver(col==='w'?'White wins!':'Black wins!');else setOver('Stalemate')}
   },[]);
 
@@ -380,7 +392,6 @@ export default function ChessEngine(){
     const b=bR.current,e=eR.current,c=cR.current;
     const d=DIFFS[dR.current];
 
-    // ── Stockfish path ────────────────────────────────────────
     if(sfReadyRef.current&&sfWorkerRef.current){
       let cancelled=false;
       sfEvalRef.current=null;
@@ -388,7 +399,6 @@ export default function ChessEngine(){
         if(cancelled)return;
         if(uciMove&&uciMove!=='(none)'){
           const m=uciToMove(uciMove,b,aiC,e);
-          // Convert score from side-to-move perspective → white perspective
           setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
           setSearchInfo(`Stockfish · skill ${SF_SKILL[dR.current]} · d${d.depth+4}`);
           applyMv(b,m,e,c,aiC);
@@ -406,7 +416,6 @@ export default function ChessEngine(){
       };
     }
 
-    // ── Built-in engine fallback (Stockfish not yet ready) ───
     const tid=setTimeout(()=>{
       const result=findBestMove(b,e,c,aiC,d.depth,d.time,d.rand);
       if(result&&result.move){
@@ -417,10 +426,10 @@ export default function ChessEngine(){
       setThinking(false);
     },50);
     return()=>clearTimeout(tid);
-  },[turn,applyMv]);
+  },[turn,applyMv,gameKey]);
 
   const click=useCallback((idx)=>{
-    if(turn!==pR.current||over||thinking)return;
+    if(viewIdx!==null||turn!==pR.current||over||thinking)return;
     const myP=pR.current==='w'?isW:isB;
     const myPawn=pR.current==='w'?WP:BP;
     const pRow=pR.current==='w'?0:7;
@@ -431,21 +440,74 @@ export default function ChessEngine(){
       if(myP(board[idx])){setSel(idx);setLm(legal(board,pR.current,ep,cas).filter(m=>m.f===idx));return}
       setSel(null);setLm([]);return}
     if(myP(board[idx])){setSel(idx);setLm(legal(board,pR.current,ep,cas).filter(m=>m.f===idx))}
-  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv]);
+  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv,viewIdx]);
 
   const doPromo=useCallback(m=>{applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);setPromo(null)},[board,ep,cas,pc,applyMv]);
-  const swap=useCallback(()=>reset(pc==='w'?'b':'w'),[pc,reset]);
+  const swap=useCallback(()=>setPc(p=>p==='w'?'b':'w'),[]);
+
+  const handleHint=useCallback(()=>{
+    if(hintMove){setHintMove(null);return;}
+    if(hintThinking||thinking||over||viewIdx!==null)return;
+    setHintThinking(true);
+    const b=board,e=ep,c=cas,t=turn;
+    if(sfReadyRef.current&&sfWorkerRef.current){
+      sfCallbackRef.current=(uciMove)=>{
+        if(uciMove&&uciMove!=='(none)'){
+          const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
+          const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
+          setHintMove({f:fr*8+fc,t:tr*8+tc});
+        }
+        setHintThinking(false);
+      };
+      sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+      sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
+      sfWorkerRef.current.postMessage(`go depth 18 movetime 2000`);
+    }else{
+      const result=findBestMove(b,e,c,t,3,600,0);
+      if(result&&result.move)setHintMove({f:result.move.f,t:result.move.t});
+      setHintThinking(false);
+    }
+  },[hintMove,hintThinking,thinking,over,viewIdx,board,ep,cas,turn]);
+
+  const handleUndo=useCallback(()=>{
+    if(thinking||histStates.length<3||viewIdx!==null)return;
+    const targetIdx=histStates.length-3;
+    const s=histStates[targetIdx];
+    setBoard(s.board);setTurn(s.turn);setEp(s.ep);setCas(s.cas);
+    setCapW(s.capW);setCapB(s.capB);setLast(s.last);
+    setHistStates(prev=>prev.slice(0,targetIdx+1));
+    setHist(prev=>prev.slice(0,prev.length-2));
+    setSel(null);setLm([]);setOver(null);setThinking(false);
+    setPromo(null);setHintMove(null);setEvalScore(null);setSearchInfo('');
+    setViewIdx(null);
+  },[thinking,histStates,viewIdx]);
 
   const chk=!over&&inChk(board,turn);
-  const matAdv=(()=>{let wL=0,bL=0;capW.forEach(p=>wL+=mv(p));capB.forEach(p=>bL+=mv(p));return bL-wL})();
 
-  // Eval bar (from white's perspective)
+  // Eval bar – 500cp(5점) = 거의 꽉 참
   const evalPct=(()=>{
     if(evalScore===null)return 50;
     if(evalScore>=9999)return 96;if(evalScore<=-9999)return 4;
-    return Math.max(4,Math.min(96, 50+evalScore/100*4.5));
+    return Math.max(4,Math.min(96, 50+(evalScore/500)*46));
   })();
   const evalText=evalScore===null?'0.0':Math.abs(evalScore)>=9999?(evalScore>0?'M+':'M-'):`${evalScore>0?'+':''}${(evalScore/100).toFixed(1)}`;
+
+  // Navigation
+  const effectiveIdx=viewIdx!==null?viewIdx:histStates.length-1;
+  const canBack=effectiveIdx>0;
+  const canFwd=effectiveIdx<histStates.length-1;
+  const isLive=viewIdx===null;
+  const goBack=()=>setViewIdx(effectiveIdx-1);
+  const goFwd=()=>{const next=effectiveIdx+1;if(next>=histStates.length-1)setViewIdx(null);else setViewIdx(next);};
+  const activeHistIdx=effectiveIdx-1;
+
+  // Display state (historical view or live)
+  const viewState=viewIdx!==null?histStates[viewIdx]:null;
+  const displayBoard=viewState?viewState.board:board;
+  const displayLast=viewState?viewState.last:last;
+  const displayCapW=viewState?viewState.capW:capW;
+  const displayCapB=viewState?viewState.capB:capB;
+  const displayMatAdv=(()=>{let wL=0,bL=0;displayCapW.forEach(p=>wL+=mv(p));displayCapB.forEach(p=>bL+=mv(p));return bL-wL})();
 
   const renderCap=(pieces,order,adv)=>{
     const g={};order.forEach(p=>g[p]=0);pieces.forEach(p=>g[p]=(g[p]||0)+1);
@@ -454,7 +516,7 @@ export default function ChessEngine(){
         <span key={`${p}-${i}`} style={{fontSize:17,lineHeight:1,marginRight:i===g[p]-1?3:-3,
           color:isW(p)?'#f5f0e8':'#555',WebkitTextStroke:isW(p)?'0.5px #4a3520':'none',
           filter:isW(p)?'drop-shadow(0 1px 1px rgba(0,0,0,0.6))':'none'}}>{SYM[p]}</span>))})}
-      {adv>0&&<span style={{fontSize:12,fontWeight:700,color:'#7ecf7e',ml:4,fontFamily:"'Space Mono',monospace",marginLeft:4}}>+{adv}</span>}
+      {adv>0&&<span style={{fontSize:12,fontWeight:700,color:'#7ecf7e',fontFamily:"'Space Mono',monospace",marginLeft:4}}>+{adv}</span>}
     </div>);
   };
 
@@ -462,14 +524,14 @@ export default function ChessEngine(){
     const sq=[];
     for(let ri=0;ri<8;ri++)for(let ci=0;ci<8;ci++){
       const r=flip?7-ri:ri,c=flip?7-ci:ci,idx=rc(r,c);
-      const piece=board[idx];const lt=(r+c)%2===0;
-      const isSel=sel===idx,isLeg=lm.some(m=>m.t===idx);
-      const isLst=last&&(last.f===idx||last.t===idx);
-      const isKC=chk&&((turn==='w'&&piece===WK)||(turn==='b'&&piece===BK));
+      const piece=displayBoard[idx];const lt=(r+c)%2===0;
+      const isSel=isLive&&sel===idx,isLeg=isLive&&lm.some(m=>m.t===idx);
+      const isLst=displayLast&&(displayLast.f===idx||displayLast.t===idx);
+      const isKC=isLive&&chk&&((turn==='w'&&piece===WK)||(turn==='b'&&piece===BK));
       let bg=lt?'#e8d5b5':'#b58863';
       if(isLst)bg=lt?'#f6f680':'#baca44';if(isSel)bg='#7fc97f';if(isKC)bg='#e74c3c';
       sq.push(<div key={idx} onClick={()=>click(idx)}
-        style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
+        style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
         {!!piece&&<span style={{fontSize:'min(6vw, 44px)',lineHeight:1,zIndex:1,
@@ -483,10 +545,10 @@ export default function ChessEngine(){
     return sq;
   };
 
-  const topCap=pc==='w'?capB:capW, botCap=pc==='w'?capW:capB;
+  const topCapDisp=pc==='w'?displayCapB:displayCapW, botCapDisp=pc==='w'?displayCapW:displayCapB;
   const topOrd=pc==='w'?B_ORD:W_ORD, botOrd=pc==='w'?W_ORD:B_ORD;
-  const topAdv=pc==='w'?(matAdv>0?matAdv:0):(matAdv<0?-matAdv:0);
-  const botAdv=pc==='w'?(matAdv<0?-matAdv:0):(matAdv>0?matAdv:0);
+  const topAdv=pc==='w'?(displayMatAdv>0?displayMatAdv:0):(displayMatAdv<0?-displayMatAdv:0);
+  const botAdv=pc==='w'?(displayMatAdv<0?-displayMatAdv:0):(displayMatAdv>0?displayMatAdv:0);
   const d=DIFFS[di];
 
   return(
@@ -529,14 +591,14 @@ export default function ChessEngine(){
           <div style={{width:24,height:24,borderRadius:5,background:ac==='w'?'#ddd':'#333',border:`2px solid ${ac==='w'?'#aaa':'#555'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13}}>{ac==='w'?'♔':'♚'}</div>
           <span style={{fontSize:11,fontWeight:700,color:'#888'}}>AI</span>
         </div>
-        {renderCap(topCap,topOrd,topAdv)}
+        {renderCap(topCapDisp,topOrd,topAdv)}
       </div>
 
       {/* Board + Eval bar */}
       <div style={{display:'flex',gap:0,alignItems:'stretch'}}>
-        {/* Eval bar */}
-        <div style={{width:14,borderRadius:'3px 0 0 3px',overflow:'hidden',background:'#333',position:'relative',flexShrink:0}}>
-          <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:'#e8e0d0',transition:'height 0.5s ease'}}/>
+        {/* Eval bar – 내 색상이 아래부터 차오름 */}
+        <div style={{width:14,borderRadius:'3px 0 0 3px',overflow:'hidden',background:flip?'#e8e0d0':'#2a2a2a',position:'relative',flexShrink:0}}>
+          <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#2a2a2a':'#e8e0d0',transition:'height 0.5s ease'}}/>
           <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:8,fontWeight:700,color:'#888',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace"}}>
             {evalText}
           </div>
@@ -545,6 +607,19 @@ export default function ChessEngine(){
         {/* Board */}
         <div style={{width:'min(84vw,400px)',height:'min(84vw,400px)',display:'flex',flexWrap:'wrap',borderRadius:'0 4px 4px 0',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.5)',position:'relative'}}>
           {renderBoard()}
+
+          {hintMove&&(()=>{
+            const sc=(idx)=>{const r=idx>>3,c=idx&7;return[(flip?7-c:c)*12.5+6.25,(flip?7-r:r)*12.5+6.25];};
+            const[x1,y1]=sc(hintMove.f);const[x2,y2]=sc(hintMove.t);
+            const dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
+            const ex=x2-dx/len*4,ey=y2-dy/len*4;
+            return(<svg style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:6}} viewBox="0 0 100 100">
+              <defs><marker id="ha" markerWidth="3" markerHeight="3" refX="1.5" refY="1.5" orient="auto">
+                <polygon points="0 0,3 1.5,0 3" fill="rgba(60,220,130,0.88)"/></marker></defs>
+              <circle cx={x1} cy={y1} r="4" fill="rgba(60,220,130,0.2)" stroke="rgba(60,220,130,0.7)" strokeWidth="0.8"/>
+              <line x1={x1} y1={y1} x2={ex} y2={ey} stroke="rgba(60,220,130,0.82)" strokeWidth="1.8" markerEnd="url(#ha)" strokeLinecap="round"/>
+            </svg>);
+          })()}
 
           {promo&&(
             <div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:10}}>
@@ -555,12 +630,6 @@ export default function ChessEngine(){
                   >{SYM[m.pr]}</button>))}
               </div>
             </div>)}
-
-          {over&&(
-            <div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.75)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',zIndex:10}}>
-              <div style={{color:'#e8d5b5',fontSize:26,fontWeight:700,fontFamily:"'Space Mono',monospace",marginBottom:14}}>{over}</div>
-              <button onClick={()=>reset()} style={{padding:'9px 24px',background:'#e8d5b5',color:'#1a1a2e',border:'none',borderRadius:8,fontWeight:700,fontSize:14,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>Play Again</button>
-            </div>)}
         </div>
       </div>
 
@@ -570,22 +639,59 @@ export default function ChessEngine(){
           <div style={{width:24,height:24,borderRadius:5,background:pc==='w'?'#ddd':'#333',border:`2px solid ${pc==='w'?'#aaa':'#555'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13}}>{pc==='w'?'♔':'♚'}</div>
           <span style={{fontSize:11,fontWeight:700,color:'#ccc'}}>You</span>
         </div>
-        {renderCap(botCap,botOrd,botAdv)}
+        {renderCap(botCapDisp,botOrd,botAdv)}
       </div>
 
       {/* Status */}
-      <div style={{marginTop:8,fontSize:13,fontWeight:500,color:thinking?'#f0c040':chk?'#e74c3c':'#888',display:'flex',alignItems:'center',gap:8}}>
-        {thinking?(<><span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>AI thinking...</>):chk?'Check!':`${turn==='w'?'White':'Black'} to move`}
+      <div style={{marginTop:8,fontSize:13,fontWeight:500,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'center'}}>
+        {over?(
+          <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.2)',borderRadius:8,padding:'6px 14px'}}>
+            <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
+            <button onClick={()=>reset()} style={{padding:'4px 12px',background:'#e8d5b5',color:'#1a1a2e',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>Play Again</button>
+          </div>
+        ):thinking?(
+          <><span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040'}}>AI thinking...</span></>
+        ):chk?(
+          <span style={{color:'#e74c3c'}}>Check!</span>
+        ):(
+          <span style={{color:'#888'}}>{turn==='w'?'White':'Black'} to move</span>
+        )}
       </div>
       {searchInfo&&<div style={{fontSize:9,color:'#555',marginTop:2,fontFamily:"'Space Mono',monospace"}}>{searchInfo}</div>}
 
-      {/* Move history */}
+      {/* Move history + navigation */}
       {hist.length>0&&(
-        <div style={{marginTop:8,width:'min(88vw,420px)',maxHeight:64,overflowY:'auto',background:'rgba(255,255,255,0.04)',borderRadius:6,padding:'6px 10px',display:'flex',flexWrap:'wrap',gap:'3px 8px',fontSize:11,fontFamily:"'Space Mono',monospace"}}>
-          {hist.map((m,i)=>(
-            <span key={i} style={{color:i%2===0?'#e8d5b5':'#8aa8d5'}}>
-              {i%2===0?`${Math.floor(i/2)+1}. `:''}{m}
-            </span>))}
+        <div style={{marginTop:8,width:'min(88vw,420px)'}}>
+          <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:4,flexWrap:'wrap'}}>
+            <button onClick={()=>setViewIdx(0)} disabled={!canBack}
+              style={{padding:'2px 7px',background:'rgba(255,255,255,0.06)',color:canBack?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:13,cursor:canBack?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.4}}>⏮</button>
+            <button onClick={goBack} disabled={!canBack}
+              style={{padding:'2px 9px',background:'rgba(255,255,255,0.06)',color:canBack?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:15,cursor:canBack?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.3}}>‹</button>
+            <button onClick={goFwd} disabled={!canFwd}
+              style={{padding:'2px 9px',background:'rgba(255,255,255,0.06)',color:canFwd?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:15,cursor:canFwd?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.3}}>›</button>
+            <button onClick={()=>setViewIdx(null)} disabled={isLive}
+              style={{padding:'2px 7px',background:'rgba(255,255,255,0.06)',color:!isLive?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:13,cursor:!isLive?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.4}}>⏭</button>
+            <div style={{width:1,height:14,background:'rgba(255,255,255,0.1)',margin:'0 2px'}}/>
+            {(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
+              <button onClick={handleUndo} disabled={!canUndo} title="한수 무르기"
+                style={{padding:'2px 8px',background:'rgba(255,255,255,0.06)',color:canUndo?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:11,cursor:canUndo?'pointer':'default',fontFamily:"'DM Sans',sans-serif",fontWeight:600}}>↩ 무르기</button>
+            );})()}
+            {(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
+              <button onClick={handleHint} disabled={!canHint&&!active} title="최적 수 힌트"
+                style={{padding:'2px 8px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.06)',color:!canHint&&!active?'#3a3a4a':active?'#3cdc82':'#ccc',border:`1px solid ${active?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.08)'}`,borderRadius:4,fontSize:11,cursor:(canHint||active)?'pointer':'default',fontFamily:"'DM Sans',sans-serif",fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
+                {hintThinking?<span style={{display:'inline-block',width:8,height:8,borderRadius:'50%',border:'1.5px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
+                {active?'힌트 끄기':'힌트'}
+              </button>
+            );})()}
+            {!isLive&&<span style={{fontSize:10,color:'#f0c040',fontFamily:"'Space Mono',monospace",marginLeft:2}}>복기 중</span>}
+          </div>
+          <div style={{maxHeight:64,overflowY:'auto',background:'rgba(255,255,255,0.04)',borderRadius:6,padding:'6px 10px',display:'flex',flexWrap:'wrap',gap:'3px 8px',fontSize:11,fontFamily:"'Space Mono',monospace"}}>
+            {hist.map((m,i)=>(
+              <span key={i} onClick={()=>setViewIdx(i+1)}
+                style={{color:i===activeHistIdx?'#f0c040':i%2===0?'#e8d5b5':'#8aa8d5',cursor:'pointer',fontWeight:i===activeHistIdx?700:400,textDecoration:i===activeHistIdx?'underline':'none'}}>
+                {i%2===0?`${Math.floor(i/2)+1}. `:''}{m}
+              </span>))}
+          </div>
         </div>)}
 
       <style>{`
