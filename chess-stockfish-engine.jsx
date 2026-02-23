@@ -521,6 +521,11 @@ export default function ChessEngine(){
     setAnalysisProgress({current:0,total});
     const evals=new Array(total).fill(null);
     let idx=0;
+    // Clean Stockfish state before starting
+    if(sfReadyRef.current&&sfWorkerRef.current){
+      sfWorkerRef.current.postMessage('stop');
+      sfWorkerRef.current.postMessage('ucinewgame');
+    }
     const next=()=>{
       if(analysisAbortRef.current){setAnalyzing(false);return;}
       if(idx>=total){
@@ -538,18 +543,31 @@ export default function ChessEngine(){
       const s=histStates[idx];
       setAnalysisProgress({current:idx+1,total});
       if(sfReadyRef.current&&sfWorkerRef.current){
-        sfCallbackRef.current=(uciMove,sfEval)=>{
+        sfEvalRef.current=null;
+        let watchdog=null;
+        const doNext=(uciMove,sfEval)=>{
+          if(watchdog){clearTimeout(watchdog);watchdog=null;}
           if(analysisAbortRef.current){setAnalyzing(false);return;}
           evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
-          idx++;next();
+          idx++;
+          setTimeout(next,30); // let event loop breathe between positions
         };
+        sfCallbackRef.current=doNext;
+        // Watchdog: if Stockfish doesn't respond in 8s (e.g. background tab), skip position
+        watchdog=setTimeout(()=>{
+          if(sfCallbackRef.current===doNext){
+            sfCallbackRef.current=null;
+            doNext(null,sfEvalRef.current);
+          }
+        },8000);
         sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
         sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
-        sfWorkerRef.current.postMessage(`go depth 15 movetime 800`);
+        sfWorkerRef.current.postMessage('go depth 12'); // depth-only: predictable finish time
       }else{
         const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
         evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
-        idx++;next();
+        idx++;
+        setTimeout(next,0);
       }
     };
     next();
