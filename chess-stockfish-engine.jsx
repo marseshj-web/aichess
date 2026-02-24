@@ -284,21 +284,40 @@ function uciToMove(uci,bd,col,ep){
   return m;
 }
 
+// Lichess Opening Explorer: returns best UCI move for a FEN position, or null on failure
+async function getOpeningMove(fen){
+  try{
+    const res=await fetch(`https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}&moves=5&topGames=0`,{signal:AbortSignal.timeout(2000)});
+    if(!res.ok)return null;
+    const data=await res.json();
+    if(data.moves&&data.moves.length>0){
+      const best=data.moves.reduce((a,b)=>
+        (a.white+a.draws+a.black)>(b.white+b.draws+b.black)?a:b
+      );
+      return best.uci;
+    }
+  }catch(e){}
+  return null;
+}
+
 // ═══════════════════════════════════════════════════
 // REVIEW / ANALYSIS HELPERS
 // ═══════════════════════════════════════════════════
 const GRADE_INFO={
-  best:      {label:'최고',   sym:'⭐',color:'#3cdc82'},
-  excellent: {label:'우수함', sym:'👍',color:'#89d4f0'},
-  good:      {label:'좋음',   sym:'✓', color:'#6abf69'},
-  inaccuracy:{label:'부정확', sym:'?!',color:'#f0c040'},
-  mistake:   {label:'실수',   sym:'?', color:'#e8a040'},
-  blunder:   {label:'블런더', sym:'??',color:'#e05050'},
+  best:      {label:'최고',    sym:'⭐',color:'#3cdc82'},
+  excellent: {label:'우수함',  sym:'👍',color:'#89d4f0'},
+  good:      {label:'좋음',    sym:'✓', color:'#6abf69'},
+  inaccuracy:{label:'부정확함',sym:'?!',color:'#f0c040'},
+  mistake:   {label:'실수',    sym:'?', color:'#e8a040'},
+  blunder:   {label:'블런더',  sym:'??',color:'#e05050'},
 };
 function classifyMove(cpLoss){
-  if(cpLoss<=0)return'best';if(cpLoss<=10)return'excellent';
-  if(cpLoss<=25)return'good';if(cpLoss<=50)return'inaccuracy';
-  if(cpLoss<=100)return'mistake';return'blunder';
+  if(cpLoss<=0)return'best';
+  if(cpLoss<=20)return'excellent';   // 0.2점
+  if(cpLoss<=50)return'good';        // 0.5점 이하: 좋은 수
+  if(cpLoss<=100)return'inaccuracy'; // 1점
+  if(cpLoss<=300)return'mistake';    // 3점 이하: 실수 (1.5점 포함)
+  return'blunder';                   // 3점 초과: 블런더
 }
 function calcAccuracy(moves){
   if(!moves.length)return'–';
@@ -348,6 +367,7 @@ export default function ChessEngine(){
   const oR=useRef(over);oR.current=over;
   const capWR=useRef(capW);capWR.current=capW;
   const capBR=useRef(capB);capBR.current=capB;
+  const histR=useRef(hist);histR.current=hist;
   const analysisAbortRef=useRef(false);
 
   // Stockfish worker refs (engine state, not React state)
@@ -425,21 +445,44 @@ export default function ChessEngine(){
 
     if(sfReadyRef.current&&sfWorkerRef.current){
       let cancelled=false;
-      sfEvalRef.current=null;
-      sfCallbackRef.current=(uciMove,sfEval)=>{
-        if(cancelled)return;
-        if(uciMove&&uciMove!=='(none)'){
-          const m=uciToMove(uciMove,b,aiC,e);
-          setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
-          setSearchInfo(`Stockfish · skill ${SF_SKILL[dR.current]} · d${d.depth+4}`);
-          applyMv(b,m,e,c,aiC);
-        }
-        setThinking(false);
-      };
       const fen=boardToFEN(b,aiC,e,c);
-      sfWorkerRef.current.postMessage(`setoption name Skill Level value ${SF_SKILL[dR.current]}`);
-      sfWorkerRef.current.postMessage(`position fen ${fen}`);
-      sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
+
+      const runEngine=()=>{
+        if(cancelled)return;
+        sfEvalRef.current=null;
+        sfCallbackRef.current=(uciMove,sfEval)=>{
+          if(cancelled)return;
+          if(uciMove&&uciMove!=='(none)'){
+            const m=uciToMove(uciMove,b,aiC,e);
+            setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
+            setSearchInfo(`Stockfish · skill ${SF_SKILL[dR.current]} · d${d.depth+4}`);
+            applyMv(b,m,e,c,aiC);
+          }
+          setThinking(false);
+        };
+        sfWorkerRef.current.postMessage(`setoption name Skill Level value ${SF_SKILL[dR.current]}`);
+        sfWorkerRef.current.postMessage(`position fen ${fen}`);
+        sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
+      };
+
+      // Opening book: Club(3) 이상 난이도, 20수 이내에서 Lichess master DB 조회
+      if(dR.current>=3&&histR.current.length<20){
+        getOpeningMove(fen).then(bookMove=>{
+          if(cancelled)return;
+          if(bookMove){
+            const m=uciToMove(bookMove,b,aiC,e);
+            setEvalScore(null);
+            setSearchInfo('Opening Book');
+            applyMv(b,m,e,c,aiC);
+            setThinking(false);
+          }else{
+            runEngine();
+          }
+        });
+      }else{
+        runEngine();
+      }
+
       return()=>{
         cancelled=true;
         sfCallbackRef.current=null;
@@ -513,6 +556,13 @@ export default function ChessEngine(){
     setViewIdx(null);
   },[thinking,histStates,viewIdx]);
 
+  const handleSurrender=useCallback(()=>{
+    if(over||thinking)return;
+    if(sfWorkerRef.current)sfWorkerRef.current.postMessage('stop');
+    setThinking(false);
+    setOver(pc==='w'?'Black wins!':'White wins!');
+  },[over,thinking,pc]);
+
   const runAnalysis=useCallback(()=>{
     if(analyzing||histStates.length<2)return;
     analysisAbortRef.current=false;
@@ -520,85 +570,114 @@ export default function ChessEngine(){
     const total=histStates.length;
     setAnalysisProgress({current:0,total});
     const evals=new Array(total).fill(null);
+    const bookHits=new Array(Math.max(0,total-1)).fill(false);
     let idx=0;
     // Clean Stockfish state before starting
     if(sfReadyRef.current&&sfWorkerRef.current){
       sfWorkerRef.current.postMessage('stop');
       sfWorkerRef.current.postMessage('ucinewgame');
     }
-    const next=()=>{
-      if(analysisAbortRef.current){setAnalyzing(false);return;}
-      if(idx>=total){
-        const cls=[];
-        for(let i=0;i<total-1;i++){
-          const t=histStates[i].turn;
-          const ei=evals[i]??0,ei1=evals[i+1]??0;
-          const cpLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
-          cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
-        }
-        setAnalysisEvals([...evals]);setMoveClassifications(cls);
-        setAnalyzing(false);setReviewMode(true);
-        return;
-      }
-      const s=histStates[idx];
-      setAnalysisProgress({current:idx+1,total});
-      if(sfReadyRef.current&&sfWorkerRef.current){
-        sfEvalRef.current=null;
-        let watchdog=null;
-        const doNext=(uciMove,sfEval)=>{
-          if(watchdog){clearTimeout(watchdog);watchdog=null;}
-          if(analysisAbortRef.current){setAnalyzing(false);return;}
-          evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
-          idx++;
-          setTimeout(next,30); // let event loop breathe between positions
-        };
-        sfCallbackRef.current=doNext;
-        // Watchdog: if Stockfish doesn't respond in 8s (e.g. background tab), skip position
-        watchdog=setTimeout(()=>{
-          if(sfCallbackRef.current===doNext){
-            sfCallbackRef.current=null;
-            doNext(null,sfEvalRef.current);
+    // Pre-fetch opening book: check first 20 plies in parallel via Lichess API
+    const openingCount=Math.min(20,total-1);
+    const bookPromises=[];
+    for(let i=0;i<openingCount;i++){
+      const s=histStates[i];
+      const fen=boardToFEN(s.board,s.turn,s.ep,s.cas);
+      bookPromises.push(
+        getOpeningMove(fen).then(bookMove=>{
+          if(bookMove&&histStates[i+1]?.last){
+            const last=histStates[i+1].last;
+            const playedUCI=FL[last.f&7]+RL[last.f>>3]+FL[last.t&7]+RL[last.t>>3];
+            if(bookMove.startsWith(playedUCI))bookHits[i]=true;
           }
-        },8000);
-        sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
-        sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
-        sfWorkerRef.current.postMessage('go depth 12'); // depth-only: predictable finish time
-      }else{
-        const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
-        evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
-        idx++;
-        setTimeout(next,0);
-      }
-    };
-    next();
+        }).catch(()=>{})
+      );
+    }
+    Promise.all(bookPromises).then(()=>{
+      if(analysisAbortRef.current){setAnalyzing(false);return;}
+      const next=()=>{
+        if(analysisAbortRef.current){setAnalyzing(false);return;}
+        if(idx>=total){
+          const cls=[];
+          for(let i=0;i<total-1;i++){
+            const t=histStates[i].turn;
+            const ei=evals[i]??0,ei1=evals[i+1]??0;
+            const rawLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
+            const cpLoss=bookHits[i]?0:rawLoss;
+            cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
+          }
+          setAnalysisEvals([...evals]);setMoveClassifications(cls);
+          setAnalyzing(false);setReviewMode(true);
+          return;
+        }
+        const s=histStates[idx];
+        setAnalysisProgress({current:idx+1,total});
+        if(sfReadyRef.current&&sfWorkerRef.current){
+          sfEvalRef.current=null;
+          let watchdog=null;
+          const doNext=(uciMove,sfEval)=>{
+            if(watchdog){clearTimeout(watchdog);watchdog=null;}
+            if(analysisAbortRef.current){setAnalyzing(false);return;}
+            evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
+            idx++;
+            setTimeout(next,30); // let event loop breathe between positions
+          };
+          sfCallbackRef.current=doNext;
+          // Watchdog: if Stockfish doesn't respond in 8s (e.g. background tab), skip position
+          watchdog=setTimeout(()=>{
+            if(sfCallbackRef.current===doNext){
+              sfCallbackRef.current=null;
+              doNext(null,sfEvalRef.current);
+            }
+          },8000);
+          sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+          sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
+          sfWorkerRef.current.postMessage('go depth 12'); // depth-only: predictable finish time
+        }else{
+          const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
+          evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
+          idx++;
+          setTimeout(next,0);
+        }
+      };
+      next();
+    });
   },[analyzing,histStates]);
 
   const renderEvalGraph=()=>{
     if(analysisEvals.length<2)return null;
-    const W=400,H=72,MAXE=600,n=analysisEvals.length;
+    const W=400,H=150,MAXE=600,n=analysisEvals.length;
     const xS=i=>Math.round((i/(n-1))*W);
-    const yS=e=>{const c=Math.max(-MAXE,Math.min(MAXE,e??0));return Math.round(H/2-(c/MAXE)*(H/2-4));};
+    const yS=e=>{const c=Math.max(-MAXE,Math.min(MAXE,e??0));return Math.round(H/2-(c/MAXE)*(H/2-8));};
     const pts=analysisEvals.map((e,i)=>[xS(i),yS(e)]);
     const line=pts.map(([x,y],i)=>`${i===0?'M':'L'}${x} ${y}`).join(' ');
-    const area=`${line} L${xS(n-1)} ${H/2} L${xS(0)} ${H/2}Z`;
+    // Dark area: from eval line down to bottom = black's territory
+    const darkArea=`${line} L${xS(n-1)} ${H} L${xS(0)} ${H}Z`;
     const GCOL={best:'#3cdc82',excellent:'#89d4f0',good:'#6abf69',inaccuracy:'#f0c040',mistake:'#e8a040',blunder:'#e05050'};
     return(
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:'block',borderRadius:4}} preserveAspectRatio="none">
-        <defs>
-          <clipPath id="clip-top"><rect x={0} y={0} width={W} height={H/2}/></clipPath>
-          <clipPath id="clip-bot"><rect x={0} y={H/2} width={W} height={H/2}/></clipPath>
-        </defs>
-        <rect width={W} height={H} fill="#16213e"/>
-        <path d={area} fill="rgba(232,224,208,0.45)" clipPath="url(#clip-top)"/>
-        <path d={area} fill="rgba(15,15,35,0.65)" clipPath="url(#clip-bot)"/>
-        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(255,255,255,0.18)" strokeWidth={0.5}/>
-        <path d={line} fill="none" stroke="rgba(200,180,140,0.7)" strokeWidth={1}/>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:'block',borderRadius:6}} preserveAspectRatio="none">
+        {/* White background = white's territory */}
+        <rect width={W} height={H} fill="#e8e0d5"/>
+        {/* Dark fill from eval line down = black's territory */}
+        <path d={darkArea} fill="#1a1816"/>
+        {/* Midline */}
+        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(100,90,80,0.35)" strokeWidth={1}/>
+        {/* Eval curve */}
+        <path d={line} fill="none" stroke="rgba(90,80,70,0.6)" strokeWidth={2}/>
+        {/* Move dots */}
         {moveClassifications.map((mc,i)=>{
           const x=xS(i+1),y=yS(analysisEvals[i+1]);
-          return<circle key={i} cx={x} cy={y} r={3} fill={GCOL[mc.grade]||'#888'} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}/>;
+          const isCurrent=effectiveIdx===i+1;
+          return(
+            <g key={i} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}>
+              {isCurrent&&<circle cx={x} cy={y} r={10} fill={GCOL[mc.grade]+'35'} stroke={GCOL[mc.grade]} strokeWidth={2}/>}
+              <circle cx={x} cy={y} r={isCurrent?6:4} fill={GCOL[mc.grade]||'#888'} stroke="rgba(255,255,255,0.6)" strokeWidth={1.5}/>
+            </g>
+          );
         })}
+        {/* Current position line */}
         {effectiveIdx>=0&&effectiveIdx<n&&(
-          <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="rgba(255,200,0,0.6)" strokeWidth={1} strokeDasharray="2,2"/>
+          <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="rgba(255,200,0,0.75)" strokeWidth={2} strokeDasharray="3,3"/>
         )}
       </svg>
     );
@@ -656,13 +735,13 @@ export default function ChessEngine(){
         style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
-        {!!piece&&<span style={{fontSize:'min(6vw, 44px)',lineHeight:1,zIndex:1,
+        {!!piece&&<span style={{fontSize:'min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px)',lineHeight:1,zIndex:1,
           color:isW(piece)?'#f5f0e8':'#1a1a1a',
           WebkitTextStroke:isW(piece)?'0.8px #4a3520':'0.5px #000',
           filter:isW(piece)?'drop-shadow(1px 1px 2px rgba(0,0,0,0.5))':'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))'
         }}>{SYM[piece]}</span>}
-        {ci===0&&<span style={{position:'absolute',top:2,left:3,fontSize:'10px',fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{RL[flip?7-ri:ri]}</span>}
-        {ri===7&&<span style={{position:'absolute',bottom:1,right:3,fontSize:'10px',fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{FL[flip?7-ci:ci]}</span>}
+        {ci===0&&<span style={{position:'absolute',top:2,left:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{RL[flip?7-ri:ri]}</span>}
+        {ri===7&&<span style={{position:'absolute',bottom:1,right:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{FL[flip?7-ci:ci]}</span>}
       </div>);}
     return sq;
   };
@@ -674,218 +753,280 @@ export default function ChessEngine(){
   const d=DIFFS[di];
 
   return(
-    <div style={{minHeight:'100vh',background:'linear-gradient(145deg,#1a1a2e 0%,#16213e 50%,#0f3460 100%)',display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:16,fontFamily:"'DM Sans',sans-serif"}}>
+    <div style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",overflow:'hidden',color:'#e8e0d5'}}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@700&display=swap" rel="stylesheet"/>
 
-      {/* Title */}
-      <div style={{fontSize:'clamp(16px,3.5vw,24px)',fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',marginBottom:6,letterSpacing:2,textTransform:'uppercase'}}>
-        ♚ Chess Arena <span style={{fontSize:10,color:'#e8a040',letterSpacing:0,textTransform:'none',fontFamily:"'DM Sans',sans-serif",fontWeight:400}}>Enhanced Engine</span>
-      </div>
-
-      {/* Controls */}
-      <div style={{display:'flex',gap:8,marginBottom:8,flexWrap:'wrap',justifyContent:'center'}}>
+      {/* ── Top bar ── */}
+      <div style={{height:52,background:'#1a1816',borderBottom:'1px solid rgba(255,255,255,0.1)',display:'flex',alignItems:'center',padding:'0 20px',gap:10,flexShrink:0}}>
+        <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',fontSize:17,marginRight:2}}>♚ Chess Arena</span>
+        <span style={{fontSize:11,color:'#e8a040',marginRight:10}}>Enhanced Engine</span>
         <button onClick={swap}
-          style={{padding:'5px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.12)',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
+          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
           {pc==='w'?'♔ White':'♚ Black'} ⇄
         </button>
         <button onClick={()=>reset()}
-          style={{padding:'5px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.12)',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-          New Game
+          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
+          ↺ New Game
         </button>
-      </div>
-
-      {/* Difficulty slider */}
-      <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10,width:'min(84vw,400px)'}}>
-        <span style={{fontSize:11,color:'#777',whiteSpace:'nowrap'}}>난이도</span>
-        <div style={{flex:1}}>
+        <div style={{display:'flex',alignItems:'center',gap:10,marginLeft:'auto'}}>
+          <span style={{fontSize:12,color:'#666'}}>난이도</span>
           <input type="range" min={0} max={9} value={di} onChange={e=>setDi(+e.target.value)}
-            style={{width:'100%',appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
-        </div>
-        <div style={{minWidth:90,textAlign:'right'}}>
-          <div style={{fontSize:12,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace"}}>{d.name}</div>
-          <div style={{fontSize:9,color:'#666'}}>{d.elo} · depth {d.depth}</div>
+            style={{width:150,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
+          <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:108}}>{d.name}</span>
+          <span style={{fontSize:11,color:'#555'}}>{d.elo} · d{d.depth}</span>
         </div>
       </div>
 
-      {/* Opponent */}
-      <div style={{width:'min(88vw,420px)',marginBottom:3,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-        <div style={{display:'flex',alignItems:'center',gap:5}}>
-          <div style={{width:24,height:24,borderRadius:5,background:ac==='w'?'#ddd':'#333',border:`2px solid ${ac==='w'?'#aaa':'#555'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13}}>{ac==='w'?'♔':'♚'}</div>
-          <span style={{fontSize:11,fontWeight:700,color:'#888'}}>AI</span>
-        </div>
-        {renderCap(topCapDisp,topOrd,topAdv)}
-      </div>
+      {/* ── Main layout ── */}
+      <div style={{flex:1,display:'flex',overflow:'hidden',minHeight:0}}>
 
-      {/* Board + Eval bar */}
-      <div style={{display:'flex',gap:0,alignItems:'stretch'}}>
-        {/* Eval bar – 내 색상이 아래부터 차오름 */}
-        <div style={{width:14,borderRadius:'3px 0 0 3px',overflow:'hidden',background:flip?'#e8e0d0':'#2a2a2a',position:'relative',flexShrink:0}}>
-          <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#2a2a2a':'#e8e0d0',transition:'height 0.5s ease'}}/>
-          <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:8,fontWeight:700,color:'#888',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace"}}>
-            {evalText}
+        {/* ── Board section ── */}
+        <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px',minWidth:0}}>
+
+          {/* Opponent row */}
+          <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
+              <div>
+                <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
+                <div style={{fontSize:12,color:'#8a8580'}}>{d.name} · {d.elo}</div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center'}}>{renderCap(topCapDisp,topOrd,topAdv)}</div>
+          </div>
+
+          {/* Eval bar + Board */}
+          <div style={{display:'flex',alignItems:'stretch'}}>
+            {/* Eval bar */}
+            <div style={{width:42,height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
+              <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#1a1816':'#e8e0d0',transition:'height 0.6s ease'}}/>
+              <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:12,fontWeight:700,color:'#e8e0d5',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace",textShadow:'0 0 6px #000,0 0 12px #000'}}>{evalText}</div>
+            </div>
+
+            {/* Board */}
+            <div style={{width:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',display:'flex',flexWrap:'wrap',borderRadius:'0 5px 5px 0',overflow:'hidden',boxShadow:'0 10px 50px rgba(0,0,0,0.7)',position:'relative'}}>
+              {renderBoard()}
+
+              {hintMove&&(()=>{
+                const sc=(idx)=>{const r=idx>>3,c=idx&7;return[(flip?7-c:c)*12.5+6.25,(flip?7-r:r)*12.5+6.25];};
+                const[x1,y1]=sc(hintMove.f);const[x2,y2]=sc(hintMove.t);
+                const dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
+                const ex=x2-dx/len*4,ey=y2-dy/len*4;
+                return(<svg style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:6}} viewBox="0 0 100 100">
+                  <defs><marker id="ha" markerWidth="3" markerHeight="3" refX="1.5" refY="1.5" orient="auto">
+                    <polygon points="0 0,3 1.5,0 3" fill="rgba(60,220,130,0.88)"/></marker></defs>
+                  <circle cx={x1} cy={y1} r="4" fill="rgba(60,220,130,0.2)" stroke="rgba(60,220,130,0.7)" strokeWidth="0.8"/>
+                  <line x1={x1} y1={y1} x2={ex} y2={ey} stroke="rgba(60,220,130,0.82)" strokeWidth="1.8" markerEnd="url(#ha)" strokeLinecap="round"/>
+                </svg>);
+              })()}
+
+              {promo&&(
+                <div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.78)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:10}}>
+                  <div style={{background:'#2c2a28',borderRadius:12,padding:'20px 16px',display:'flex',gap:12,boxShadow:'0 6px 28px rgba(0,0,0,0.7)'}}>
+                    {promo.mvs.map((m,i)=>(
+                      <button key={i} onClick={()=>doPromo(m)}
+                        style={{width:70,height:70,fontSize:46,background:'rgba(255,255,255,0.08)',border:'2px solid rgba(255,255,255,0.18)',borderRadius:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff'}}>
+                        {SYM[m.pr]}</button>))}
+                  </div>
+                </div>)}
+            </div>
+          </div>
+
+          {/* Player row */}
+          <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginTop:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+            <div style={{display:'flex',alignItems:'center',gap:10}}>
+              <div style={{width:46,height:46,borderRadius:8,background:pc==='w'?'#3a3028':'#d4c49a',border:`2px solid ${pc==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:pc==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:pc==='w'?'0':'0.5px #000'}}>{pc==='w'?'♔':'♚'}</div>
+              <div>
+                <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>You</div>
+                <div style={{fontSize:12,color:'#8a8580'}}>{pc==='w'?'White':'Black'}</div>
+              </div>
+            </div>
+            <div style={{display:'flex',alignItems:'center'}}>{renderCap(botCapDisp,botOrd,botAdv)}</div>
           </div>
         </div>
 
-        {/* Board */}
-        <div style={{width:'min(84vw,400px)',height:'min(84vw,400px)',display:'flex',flexWrap:'wrap',borderRadius:'0 4px 4px 0',overflow:'hidden',boxShadow:'0 8px 40px rgba(0,0,0,0.5)',position:'relative'}}>
-          {renderBoard()}
+        {/* ── Right panel ── */}
+        <div style={{width:400,background:'#1a1816',borderLeft:'1px solid rgba(255,255,255,0.1)',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
 
-          {hintMove&&(()=>{
-            const sc=(idx)=>{const r=idx>>3,c=idx&7;return[(flip?7-c:c)*12.5+6.25,(flip?7-r:r)*12.5+6.25];};
-            const[x1,y1]=sc(hintMove.f);const[x2,y2]=sc(hintMove.t);
-            const dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
-            const ex=x2-dx/len*4,ey=y2-dy/len*4;
-            return(<svg style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:6}} viewBox="0 0 100 100">
-              <defs><marker id="ha" markerWidth="3" markerHeight="3" refX="1.5" refY="1.5" orient="auto">
-                <polygon points="0 0,3 1.5,0 3" fill="rgba(60,220,130,0.88)"/></marker></defs>
-              <circle cx={x1} cy={y1} r="4" fill="rgba(60,220,130,0.2)" stroke="rgba(60,220,130,0.7)" strokeWidth="0.8"/>
-              <line x1={x1} y1={y1} x2={ex} y2={ey} stroke="rgba(60,220,130,0.82)" strokeWidth="1.8" markerEnd="url(#ha)" strokeLinecap="round"/>
-            </svg>);
-          })()}
+          {/* Panel header */}
+          <div style={{padding:'14px 20px',borderBottom:'1px solid rgba(255,255,255,0.08)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+            <span style={{fontSize:19,color:'#f0c040'}}>⭐</span>
+            <span style={{fontSize:16,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace"}}>게임 리뷰</span>
+          </div>
 
-          {promo&&(
-            <div style={{position:'absolute',inset:0,background:'rgba(0,0,0,0.7)',display:'flex',alignItems:'center',justifyContent:'center',zIndex:10}}>
-              <div style={{background:'#2a2a4a',borderRadius:12,padding:'18px 14px',display:'flex',gap:10,boxShadow:'0 4px 20px rgba(0,0,0,0.5)'}}>
-                {promo.mvs.map((m,i)=>(
-                  <button key={i} onClick={()=>doPromo(m)}
-                    style={{width:52,height:52,fontSize:34,background:'rgba(255,255,255,0.1)',border:'2px solid rgba(255,255,255,0.2)',borderRadius:8,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff'}}
-                  >{SYM[m.pr]}</button>))}
-              </div>
-            </div>)}
-        </div>
-      </div>
-
-      {/* Player */}
-      <div style={{width:'min(88vw,420px)',marginTop:3,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-        <div style={{display:'flex',alignItems:'center',gap:5}}>
-          <div style={{width:24,height:24,borderRadius:5,background:pc==='w'?'#ddd':'#333',border:`2px solid ${pc==='w'?'#aaa':'#555'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:13}}>{pc==='w'?'♔':'♚'}</div>
-          <span style={{fontSize:11,fontWeight:700,color:'#ccc'}}>You</span>
-        </div>
-        {renderCap(botCapDisp,botOrd,botAdv)}
-      </div>
-
-      {/* Status */}
-      <div style={{marginTop:8,fontSize:13,fontWeight:500,display:'flex',flexDirection:'column',alignItems:'center',gap:6}}>
-        <div style={{display:'flex',alignItems:'center',gap:8,flexWrap:'wrap',justifyContent:'center'}}>
-          {over?(
-            <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.2)',borderRadius:8,padding:'6px 14px'}}>
-              <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
-              <button onClick={()=>reset()} style={{padding:'4px 12px',background:'#e8d5b5',color:'#1a1a2e',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>Play Again</button>
+          {/* ── Controls section (always visible) ── */}
+          <div style={{padding:'12px 18px',borderBottom:'1px solid rgba(255,255,255,0.08)',flexShrink:0}}>
+            {/* Status */}
+            <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:34,marginBottom:6}}>
+              {over?(
+                <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.18)',borderRadius:8,padding:'6px 14px'}}>
+                  <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
+                  <button onClick={()=>reset()} style={{padding:'5px 13px',background:'#e8d5b5',color:'#1a1816',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer'}}>Play Again</button>
+                </div>
+              ):thinking?(
+                <><span style={{display:'inline-block',width:12,height:12,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040',marginLeft:6,fontSize:14}}>AI thinking...</span></>
+              ):chk?(
+                <span style={{color:'#e74c3c',fontWeight:700,fontSize:15}}>Check!</span>
+              ):(
+                <span style={{color:'#8a8580',fontSize:13}}>{turn==='w'?'White':'Black'} to move</span>
+              )}
             </div>
-          ):thinking?(
-            <><span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040'}}>AI thinking...</span></>
-          ):chk?(
-            <span style={{color:'#e74c3c'}}>Check!</span>
-          ):(
-            <span style={{color:'#888'}}>{turn==='w'?'White':'Black'} to move</span>
+
+            {/* Move grade badge when reviewing */}
+            {viewIdx!==null&&viewIdx>0&&moveClassifications[viewIdx-1]&&(()=>{
+              const mc=moveClassifications[viewIdx-1];
+              const gi=GRADE_INFO[mc.grade];
+              return(
+                <div style={{display:'flex',alignItems:'center',gap:7,padding:'6px 12px',background:gi.color+'18',border:`1px solid ${gi.color}44`,borderRadius:7,marginBottom:6}}>
+                  <span style={{fontSize:16}}>{gi.sym}</span>
+                  <span style={{fontSize:14,fontWeight:700,color:gi.color,fontFamily:"'Space Mono',monospace"}}>{gi.label}</span>
+                  <span style={{fontSize:11,color:'#8a8580',marginLeft:4}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
+                  {!isLive&&<span style={{fontSize:10,color:'#f0c040',marginLeft:'auto',fontFamily:"'Space Mono',monospace"}}>복기 중</span>}
+                </div>
+              );
+            })()}
+
+            {/* Navigation */}
+            <div style={{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+              <button onClick={()=>setViewIdx(0)} disabled={!canBack}
+                style={{padding:'7px 10px',background:'rgba(255,255,255,0.07)',color:canBack?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:15,cursor:canBack?'pointer':'default',lineHeight:1}}>⏮</button>
+              <button onClick={goBack} disabled={!canBack}
+                style={{padding:'7px 12px',background:'rgba(255,255,255,0.07)',color:canBack?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:19,cursor:canBack?'pointer':'default',lineHeight:1}}>‹</button>
+              <button onClick={goFwd} disabled={!canFwd}
+                style={{padding:'7px 12px',background:'rgba(255,255,255,0.07)',color:canFwd?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:19,cursor:canFwd?'pointer':'default',lineHeight:1}}>›</button>
+              <button onClick={()=>setViewIdx(null)} disabled={isLive}
+                style={{padding:'7px 10px',background:'rgba(255,255,255,0.07)',color:!isLive?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:15,cursor:!isLive?'pointer':'default',lineHeight:1}}>⏭</button>
+              <div style={{width:1,height:20,background:'rgba(255,255,255,0.1)',margin:'0 3px'}}/>
+              {(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
+                <button onClick={handleUndo} disabled={!canUndo}
+                  style={{padding:'7px 11px',background:'rgba(255,255,255,0.07)',color:canUndo?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:12,cursor:canUndo?'pointer':'default',fontWeight:600}}>↩ 무르기</button>
+              );})()}
+              {(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
+                <button onClick={handleHint} disabled={!canHint&&!active}
+                  style={{padding:'7px 11px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.07)',color:!canHint&&!active?'#3a3530':active?'#3cdc82':'#ccc',border:`1px solid ${active?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.09)'}`,borderRadius:6,fontSize:12,cursor:(canHint||active)?'pointer':'default',fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
+                  {hintThinking?<span style={{display:'inline-block',width:9,height:9,borderRadius:'50%',border:'1.5px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
+                  {active?'끄기':'힌트'}
+                </button>
+              );})()}
+              {(()=>{const canSurr=!over&&!thinking&&isLive&&hist.length>0;return(
+                <button onClick={handleSurrender} disabled={!canSurr}
+                  style={{padding:'7px 11px',background:'rgba(220,60,60,0.12)',color:canSurr?'#e07070':'#3a3530',border:`1px solid ${canSurr?'rgba(220,60,60,0.3)':'rgba(255,255,255,0.06)'}`,borderRadius:6,fontSize:12,cursor:canSurr?'pointer':'default',fontWeight:600}}>
+                  🏳 항복
+                </button>
+              );})()}
+            </div>
+            {searchInfo&&<div style={{fontSize:10,color:'#444',marginTop:4,fontFamily:"'Space Mono',monospace"}}>{searchInfo}</div>}
+          </div>
+
+          {/* Scrollable content */}
+          <div style={{flex:1,overflowY:'auto',overflowX:'hidden'}}>
+            {reviewMode?(
+              <div style={{padding:'14px 18px'}}>
+                {/* Eval graph */}
+                <div style={{marginBottom:14,borderRadius:7,overflow:'hidden',border:'1px solid rgba(255,255,255,0.15)'}}>
+                  {renderEvalGraph()}
+                </div>
+
+                {/* Player + accuracy */}
+                <div style={{display:'grid',gridTemplateColumns:'auto 1fr 1fr',gap:'6px 10px',marginBottom:14,alignItems:'center'}}>
+                  <div style={{fontSize:12,color:'#8a8580'}}>플레이어</div>
+                  {[pc,pc==='w'?'b':'w'].map(color=>(
+                    <div key={color} style={{background:color==='w'?'rgba(220,212,200,0.07)':'rgba(40,36,32,0.5)',borderRadius:7,padding:'7px',textAlign:'center',border:'1px solid rgba(255,255,255,0.06)'}}>
+                      <div style={{width:36,height:36,borderRadius:6,background:color==='w'?'#3a3028':'#d4c49a',border:`2px solid ${color==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,margin:'0 auto 3px',color:color==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:color==='w'?'0':'0.5px #000'}}>{color==='w'?'♔':'♚'}</div>
+                      <div style={{fontSize:11,color:'#8a8580'}}>{color===pc?'You':'AI'}</div>
+                    </div>
+                  ))}
+                  <div style={{fontSize:12,color:'#8a8580'}}>정확성</div>
+                  {[pc,pc==='w'?'b':'w'].map(color=>{
+                    const moves=moveClassifications.filter(m=>m.player===color);
+                    const acc=calcAccuracy(moves);
+                    return(
+                      <div key={color} style={{background:color==='w'?'rgba(220,212,200,0.07)':'rgba(40,36,32,0.5)',borderRadius:7,padding:'9px',textAlign:'center',border:`2px solid ${color===pc?'rgba(255,255,255,0.22)':'rgba(255,255,255,0.04)'}`,fontFamily:"'Space Mono',monospace",fontWeight:700,fontSize:26,color:'#e8e0d5'}}>
+                        {acc}
+                      </div>
+                    );
+                  })}
+                </div>
+
+                {/* Grade breakdown */}
+                <div style={{display:'flex',flexDirection:'column'}}>
+                  {Object.entries(GRADE_INFO).map(([key,gi])=>{
+                    const wC=moveClassifications.filter(m=>m.player==='w'&&m.grade===key).length;
+                    const bC=moveClassifications.filter(m=>m.player==='b'&&m.grade===key).length;
+                    const firstC=pc==='w'?wC:bC, secondC=pc==='w'?bC:wC;
+                    return(
+                      <div key={key} style={{display:'grid',gridTemplateColumns:'1fr auto auto auto',alignItems:'center',gap:'0 12px',padding:'9px 2px',borderBottom:'1px solid rgba(255,255,255,0.05)'}}>
+                        <span style={{fontSize:14,color:'#b0a898'}}>{gi.label}</span>
+                        <span style={{fontSize:17,fontWeight:700,color:firstC>0?gi.color:'#3a3530',textAlign:'right',minWidth:26,fontFamily:"'Space Mono',monospace"}}>{firstC}</span>
+                        <div style={{width:34,height:34,borderRadius:'50%',background:gi.color+'18',border:`2px solid ${gi.color}55`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:16,flexShrink:0}}>{gi.sym}</div>
+                        <span style={{fontSize:17,fontWeight:700,color:secondC>0?gi.color:'#3a3530',textAlign:'left',minWidth:26,fontFamily:"'Space Mono',monospace"}}>{secondC}</span>
+                      </div>
+                    );
+                  })}
+                </div>
+              </div>
+            ):(
+              // Move history
+              <div style={{padding:'12px 18px'}}>
+                {hist.length===0?(
+                  <div style={{color:'#555',fontSize:14,textAlign:'center',paddingTop:24}}>게임을 시작하세요</div>
+                ):(
+                  <>
+                    <div style={{fontSize:11,color:'#666',marginBottom:8,fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
+                    <div style={{display:'flex',flexDirection:'column',gap:1}}>
+                      {Array.from({length:Math.ceil(hist.length/2)}).map((_,i)=>{
+                        const w=hist[i*2],b=hist[i*2+1];
+                        const wMc=moveClassifications[i*2];const bMc=moveClassifications[i*2+1];
+                        const wGi=wMc?GRADE_INFO[wMc.grade]:null;const bGi=bMc?GRADE_INFO[bMc.grade]:null;
+                        return(
+                          <div key={i} style={{display:'grid',gridTemplateColumns:'28px 1fr 1fr',gap:4,padding:'3px 4px',borderRadius:4,background:i%2===0?'transparent':'rgba(255,255,255,0.02)'}}>
+                            <span style={{fontSize:12,color:'#555',fontFamily:"'Space Mono',monospace",paddingTop:3}}>{i+1}.</span>
+                            {w&&<span onClick={()=>setViewIdx(i*2+1)}
+                              style={{fontSize:13,color:activeHistIdx===i*2?'#f0c040':'#e8d5b5',cursor:'pointer',fontFamily:"'Space Mono',monospace",display:'flex',alignItems:'center',gap:3,fontWeight:activeHistIdx===i*2?700:400,background:activeHistIdx===i*2?'rgba(240,192,64,0.12)':'transparent',borderRadius:3,padding:'2px 5px'}}>
+                              {w}{wGi&&<span style={{fontSize:10,color:wGi.color}}>{wGi.sym}</span>}
+                            </span>}
+                            {b&&<span onClick={()=>setViewIdx(i*2+2)}
+                              style={{fontSize:13,color:activeHistIdx===i*2+1?'#f0c040':'#8aa8d5',cursor:'pointer',fontFamily:"'Space Mono',monospace",display:'flex',alignItems:'center',gap:3,fontWeight:activeHistIdx===i*2+1?700:400,background:activeHistIdx===i*2+1?'rgba(240,192,64,0.12)':'transparent',borderRadius:3,padding:'2px 5px'}}>
+                              {b}{bGi&&<span style={{fontSize:10,color:bGi.color}}>{bGi.sym}</span>}
+                            </span>}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </>
+                )}
+              </div>
+            )}
+          </div>
+
+          {/* Bottom actions */}
+          {analyzing&&(
+            <div style={{padding:'12px 18px',borderTop:'1px solid rgba(255,255,255,0.08)',flexShrink:0}}>
+              <div style={{fontSize:12,color:'#e8a040',marginBottom:6,textAlign:'center',fontFamily:"'Space Mono',monospace"}}>
+                분석 중... {analysisProgress.current}/{analysisProgress.total}
+              </div>
+              <div style={{height:5,background:'rgba(255,255,255,0.06)',borderRadius:3}}>
+                <div style={{height:'100%',background:'#e8a040',borderRadius:3,transition:'width 0.3s',width:`${analysisProgress.total?Math.round(analysisProgress.current/analysisProgress.total*100):0}%`}}/>
+              </div>
+            </div>
+          )}
+          {over&&!analyzing&&!reviewMode&&hist.length>1&&(
+            <div style={{padding:'12px 18px',borderTop:'1px solid rgba(255,255,255,0.08)',flexShrink:0}}>
+              <button onClick={runAnalysis}
+                style={{width:'100%',padding:'14px',background:'#4e8c35',color:'#fff',border:'none',borderRadius:8,fontWeight:700,fontSize:16,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",letterSpacing:0.3}}>
+                리뷰 시작
+              </button>
+            </div>
           )}
         </div>
-        {over&&!analyzing&&!reviewMode&&hist.length>1&&(
-          <button onClick={runAnalysis}
-            style={{padding:'6px 20px',background:'linear-gradient(135deg,#2a6e4a,#1a4a30)',color:'#7ef0b0',border:'1px solid rgba(60,220,130,0.3)',borderRadius:8,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",letterSpacing:0.5}}>
-            📊 리뷰 시작
-          </button>
-        )}
-        {analyzing&&(
-          <div style={{width:'min(84vw,400px)',textAlign:'center'}}>
-            <div style={{fontSize:11,color:'#e8a040',marginBottom:4,fontFamily:"'Space Mono',monospace"}}>
-              분석 중... {analysisProgress.current}/{analysisProgress.total}
-            </div>
-            <div style={{height:4,background:'rgba(255,255,255,0.08)',borderRadius:2}}>
-              <div style={{height:'100%',background:'#e8a040',borderRadius:2,transition:'width 0.3s',width:`${analysisProgress.total?Math.round(analysisProgress.current/analysisProgress.total*100):0}%`}}/>
-            </div>
-          </div>
-        )}
+
       </div>
-      {searchInfo&&<div style={{fontSize:9,color:'#555',marginTop:2,fontFamily:"'Space Mono',monospace"}}>{searchInfo}</div>}
-
-      {/* Move history + navigation */}
-      {hist.length>0&&(
-        <div style={{marginTop:8,width:'min(88vw,420px)'}}>
-          <div style={{display:'flex',alignItems:'center',gap:4,marginBottom:4,flexWrap:'wrap'}}>
-            <button onClick={()=>setViewIdx(0)} disabled={!canBack}
-              style={{padding:'2px 7px',background:'rgba(255,255,255,0.06)',color:canBack?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:13,cursor:canBack?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.4}}>⏮</button>
-            <button onClick={goBack} disabled={!canBack}
-              style={{padding:'2px 9px',background:'rgba(255,255,255,0.06)',color:canBack?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:15,cursor:canBack?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.3}}>‹</button>
-            <button onClick={goFwd} disabled={!canFwd}
-              style={{padding:'2px 9px',background:'rgba(255,255,255,0.06)',color:canFwd?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:15,cursor:canFwd?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.3}}>›</button>
-            <button onClick={()=>setViewIdx(null)} disabled={isLive}
-              style={{padding:'2px 7px',background:'rgba(255,255,255,0.06)',color:!isLive?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:13,cursor:!isLive?'pointer':'default',fontFamily:"'Space Mono',monospace",lineHeight:1.4}}>⏭</button>
-            <div style={{width:1,height:14,background:'rgba(255,255,255,0.1)',margin:'0 2px'}}/>
-            {(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
-              <button onClick={handleUndo} disabled={!canUndo} title="한수 무르기"
-                style={{padding:'2px 8px',background:'rgba(255,255,255,0.06)',color:canUndo?'#ccc':'#3a3a4a',border:'1px solid rgba(255,255,255,0.08)',borderRadius:4,fontSize:11,cursor:canUndo?'pointer':'default',fontFamily:"'DM Sans',sans-serif",fontWeight:600}}>↩ 무르기</button>
-            );})()}
-            {(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
-              <button onClick={handleHint} disabled={!canHint&&!active} title="최적 수 힌트"
-                style={{padding:'2px 8px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.06)',color:!canHint&&!active?'#3a3a4a':active?'#3cdc82':'#ccc',border:`1px solid ${active?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.08)'}`,borderRadius:4,fontSize:11,cursor:(canHint||active)?'pointer':'default',fontFamily:"'DM Sans',sans-serif",fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
-                {hintThinking?<span style={{display:'inline-block',width:8,height:8,borderRadius:'50%',border:'1.5px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
-                {active?'힌트 끄기':'힌트'}
-              </button>
-            );})()}
-            {!isLive&&<span style={{fontSize:10,color:'#f0c040',fontFamily:"'Space Mono',monospace",marginLeft:2}}>복기 중</span>}
-          </div>
-          <div style={{maxHeight:64,overflowY:'auto',background:'rgba(255,255,255,0.04)',borderRadius:6,padding:'6px 10px',display:'flex',flexWrap:'wrap',gap:'3px 8px',fontSize:11,fontFamily:"'Space Mono',monospace"}}>
-            {hist.map((m,i)=>{
-              const mc=moveClassifications[i];const gi=mc?GRADE_INFO[mc.grade]:null;
-              return(
-                <span key={i} onClick={()=>setViewIdx(i+1)}
-                  style={{color:i===activeHistIdx?'#f0c040':i%2===0?'#e8d5b5':'#8aa8d5',cursor:'pointer',fontWeight:i===activeHistIdx?700:400,textDecoration:i===activeHistIdx?'underline':'none',display:'inline-flex',alignItems:'center',gap:2}}>
-                  {i%2===0?`${Math.floor(i/2)+1}. `:''}{m}{gi&&<span title={gi.label} style={{fontSize:9,color:gi.color,lineHeight:1}}>{gi.sym}</span>}
-                </span>
-              );
-            })}
-          </div>
-        </div>)}
-
-      {/* Review panel */}
-      {reviewMode&&(
-        <div style={{marginTop:12,width:'min(88vw,420px)',background:'rgba(255,255,255,0.04)',borderRadius:10,padding:'14px 16px',border:'1px solid rgba(255,255,255,0.08)'}}>
-          <div style={{fontSize:13,fontWeight:700,color:'#e8d5b5',marginBottom:10,fontFamily:"'Space Mono',monospace",letterSpacing:1}}>📊 수 분석</div>
-          {/* Eval graph */}
-          <div style={{marginBottom:12,borderRadius:6,overflow:'hidden'}}>
-            {renderEvalGraph()}
-          </div>
-          {/* Accuracy scores */}
-          <div style={{display:'flex',gap:10,marginBottom:12}}>
-            {[['w',pc==='w'?'You':'AI'],['b',pc==='b'?'You':'AI']].map(([color,label])=>{
-              const moves=moveClassifications.filter(m=>m.player===color);
-              const acc=calcAccuracy(moves);
-              return(
-                <div key={color} style={{flex:1,background:'rgba(255,255,255,0.04)',borderRadius:8,padding:'10px 12px',textAlign:'center',border:'1px solid rgba(255,255,255,0.06)'}}>
-                  <div style={{fontSize:9,color:'#777',marginBottom:3,textTransform:'uppercase',letterSpacing:0.5}}>{label} ({color==='w'?'백':'흑'})</div>
-                  <div style={{fontSize:26,fontWeight:700,color:'#e8d5b5',fontFamily:"'Space Mono',monospace",lineHeight:1}}>{acc}</div>
-                  <div style={{fontSize:9,color:'#666',marginTop:2}}>정확도 %</div>
-                </div>
-              );
-            })}
-          </div>
-          {/* Grade breakdown */}
-          <div style={{display:'grid',gridTemplateColumns:'1fr 1fr',gap:5}}>
-            {Object.entries(GRADE_INFO).map(([key,gi])=>{
-              const wC=moveClassifications.filter(m=>m.player==='w'&&m.grade===key).length;
-              const bC=moveClassifications.filter(m=>m.player==='b'&&m.grade===key).length;
-              if(!wC&&!bC)return null;
-              return(
-                <div key={key} style={{display:'flex',alignItems:'center',gap:6,background:'rgba(255,255,255,0.03)',borderRadius:6,padding:'5px 8px',border:`1px solid ${gi.color}33`}}>
-                  <span style={{fontSize:13,width:20,textAlign:'center',flexShrink:0}}>{gi.sym}</span>
-                  <div style={{flex:1,fontSize:10,color:gi.color,fontWeight:700}}>{gi.label}</div>
-                  <div style={{display:'flex',gap:3,fontSize:11,fontFamily:"'Space Mono',monospace"}}>
-                    <span title="백" style={{color:'#e8d5b5',background:'rgba(232,224,208,0.1)',borderRadius:3,padding:'1px 5px'}}>{wC}</span>
-                    <span title="흑" style={{color:'#8aa8d5',background:'rgba(138,168,213,0.1)',borderRadius:3,padding:'1px 5px'}}>{bC}</span>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-      )}
 
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
-        ::-webkit-scrollbar{width:4px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.12);border-radius:2px}
-        input[type=range]::-webkit-slider-thumb{appearance:none;width:16px;height:16px;border-radius:50%;background:#e8d5b5;border:2px solid #1a1a2e;cursor:pointer;box-shadow:0 2px 6px rgba(0,0,0,0.4)}
-        input[type=range]::-moz-range-thumb{width:16px;height:16px;border-radius:50%;background:#e8d5b5;border:2px solid #1a1a2e;cursor:pointer}
+        ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:3px}
+        input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5)}
+        input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer}
       `}</style>
     </div>
   );
