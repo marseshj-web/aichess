@@ -239,16 +239,25 @@ function findBestMove(bd,ep,cas,aiCol,maxDepth,timeLimitMs,randomness){
 // DIFFICULTY SETTINGS
 // ═══════════════════════════════════════════════════
 const DIFFS=[
-  {name:'Beginner',   depth:1, time:200,  rand:200, elo:'~600',  color:'#5cb85c'},
-  {name:'Novice',     depth:2, time:300,  rand:100, elo:'~800',  color:'#5cb85c'},
-  {name:'Casual',     depth:2, time:500,  rand:50,  elo:'~1000', color:'#8cc152'},
-  {name:'Club',       depth:3, time:800,  rand:20,  elo:'~1200', color:'#e8d5b5'},
-  {name:'Intermediate',depth:3,time:1200, rand:10,  elo:'~1300', color:'#e8d5b5'},
-  {name:'Strong',     depth:4, time:2000, rand:5,   elo:'~1500', color:'#e8a040'},
-  {name:'Advanced',   depth:4, time:3000, rand:0,   elo:'~1600', color:'#e8a040'},
-  {name:'Expert',     depth:5, time:4000, rand:0,   elo:'~1700', color:'#e06050'},
-  {name:'Master',     depth:5, time:6000, rand:0,   elo:'~1800', color:'#d04040'},
-  {name:'Maximum',    depth:6, time:10000,rand:0,   elo:'~1900+',color:'#b02020'},
+  {name:'~600',  elo:600,  skill:0,  depth:1, time:150,  rand:250, color:'#5cb85c'},
+  {name:'~700',  elo:700,  skill:1,  depth:1, time:200,  rand:200, color:'#5cb85c'},
+  {name:'~800',  elo:800,  skill:2,  depth:1, time:250,  rand:150, color:'#7cbb52'},
+  {name:'~900',  elo:900,  skill:3,  depth:2, time:300,  rand:100, color:'#8cc152'},
+  {name:'~1000', elo:1000, skill:4,  depth:2, time:400,  rand:70,  color:'#8cc152'},
+  {name:'~1100', elo:1100, skill:5,  depth:2, time:550,  rand:50,  color:'#b8c152'},
+  {name:'~1200', elo:1200, skill:6,  depth:3, time:700,  rand:30,  color:'#e8d5b5'},
+  {name:'~1300', elo:1300, skill:7,  depth:3, time:900,  rand:20,  color:'#e8d5b5'},
+  {name:'~1400', elo:1400, skill:8,  depth:3, time:1100, rand:10,  color:'#e8d5b5'},
+  {name:'~1500', elo:1500, skill:10, depth:4, time:1400, rand:5,   color:'#e8b040'},
+  {name:'~1600', elo:1600, skill:11, depth:4, time:1800, rand:3,   color:'#e8a040'},
+  {name:'~1700', elo:1700, skill:12, depth:4, time:2500, rand:0,   color:'#e8a040'},
+  {name:'~1800', elo:1800, skill:13, depth:4, time:3000, rand:0,   color:'#e07040'},
+  {name:'~1900', elo:1900, skill:15, depth:5, time:4000, rand:0,   color:'#e06050'},
+  {name:'~2000', elo:2000, skill:16, depth:5, time:5000, rand:0,   color:'#d05040'},
+  {name:'~2100', elo:2100, skill:17, depth:5, time:6000, rand:0,   color:'#d04040'},
+  {name:'~2200', elo:2200, skill:18, depth:6, time:7500, rand:0,   color:'#c03030'},
+  {name:'~2300', elo:2300, skill:19, depth:6, time:9000, rand:0,   color:'#b02020'},
+  {name:'Max',   elo:2400, skill:20, depth:6, time:10000,rand:0,   color:'#902010'},
 ];
 
 const W_ORD=[WQ,WR,WB,WN,WP], B_ORD=[BQ,BR,BB,BN,BP];
@@ -256,9 +265,6 @@ const W_ORD=[WQ,WR,WB,WN,WP], B_ORD=[BQ,BR,BB,BN,BP];
 // ═══════════════════════════════════════════════════
 // STOCKFISH INTEGRATION HELPERS
 // ═══════════════════════════════════════════════════
-// Stockfish UCI Skill Level per difficulty index (0=weakest, 20=strongest)
-const SF_SKILL=[0,2,4,6,8,11,13,15,17,20];
-
 // Convert internal board array + game state to UCI FEN string
 function boardToFEN(bd,col,ep,cas){
   const PC={[WP]:'P',[WN]:'N',[WB]:'B',[WR]:'R',[WQ]:'Q',[WK]:'K',
@@ -336,7 +342,8 @@ export default function ChessEngine(){
   const[ep,setEp]=useState(null);
   const[cas,setCas]=useState('KQkq');
   const[over,setOver]=useState(null);
-  const[di,setDi]=useState(3);
+  const[di,setDi]=useState(6);
+  const[eloInput,setEloInput]=useState('');
   const[thinking,setThinking]=useState(false);
   const[last,setLast]=useState(null);
   const[capW,setCapW]=useState([]);
@@ -353,6 +360,7 @@ export default function ChessEngine(){
   const[hintThinking,setHintThinking]=useState(false);
   const[analysisEvals,setAnalysisEvals]=useState([]);
   const[moveClassifications,setMoveClassifications]=useState([]);
+  const[bestMoves,setBestMoves]=useState([]);
   const[analyzing,setAnalyzing]=useState(false);
   const[analysisProgress,setAnalysisProgress]=useState({current:0,total:0});
   const[reviewMode,setReviewMode]=useState(false);
@@ -416,7 +424,7 @@ export default function ChessEngine(){
     setHistStates([{board:initB,turn:'w',ep:null,cas:'KQkq',last:null,capW:[],capB:[]}]);
     setViewIdx(null);setHintMove(null);setHintThinking(false);
     analysisAbortRef.current=true;
-    setAnalysisEvals([]);setMoveClassifications([]);setAnalyzing(false);
+    setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);setAnalyzing(false);
     setAnalysisProgress({current:0,total:0});setReviewMode(false);
     setGameKey(k=>k+1);
   },[]);
@@ -455,18 +463,18 @@ export default function ChessEngine(){
           if(uciMove&&uciMove!=='(none)'){
             const m=uciToMove(uciMove,b,aiC,e);
             setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
-            setSearchInfo(`Stockfish · skill ${SF_SKILL[dR.current]} · d${d.depth+4}`);
+            setSearchInfo(`Stockfish · skill ${DIFFS[dR.current].skill} · d${d.depth+4}`);
             applyMv(b,m,e,c,aiC);
           }
           setThinking(false);
         };
-        sfWorkerRef.current.postMessage(`setoption name Skill Level value ${SF_SKILL[dR.current]}`);
+        sfWorkerRef.current.postMessage(`setoption name Skill Level value ${DIFFS[dR.current].skill}`);
         sfWorkerRef.current.postMessage(`position fen ${fen}`);
         sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
       };
 
       // Opening book: Club(3) 이상 난이도, 20수 이내에서 Lichess master DB 조회
-      if(dR.current>=3&&histR.current.length<20){
+      if(dR.current>=6&&histR.current.length<20){
         getOpeningMove(fen).then(bookMove=>{
           if(cancelled)return;
           if(bookMove){
@@ -570,6 +578,7 @@ export default function ChessEngine(){
     const total=histStates.length;
     setAnalysisProgress({current:0,total});
     const evals=new Array(total).fill(null);
+    const bestMovesArr=new Array(total).fill(null);
     const bookHits=new Array(Math.max(0,total-1)).fill(false);
     let idx=0;
     // Clean Stockfish state before starting
@@ -602,11 +611,15 @@ export default function ChessEngine(){
           for(let i=0;i<total-1;i++){
             const t=histStates[i].turn;
             const ei=evals[i]??0,ei1=evals[i+1]??0;
-            const rawLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
+            let rawLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
+            // 실제로 둔 수가 최선의 수와 같으면 독립 분석 불일치 무관하게 손실 0
+            const bm=bestMovesArr[i];
+            const played=histStates[i+1]?.last;
+            if(bm&&played&&bm.f===played.f&&bm.t===played.t)rawLoss=0;
             const cpLoss=bookHits[i]?0:rawLoss;
             cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
           }
-          setAnalysisEvals([...evals]);setMoveClassifications(cls);
+          setAnalysisEvals([...evals]);setMoveClassifications(cls);setBestMoves([...bestMovesArr]);
           setAnalyzing(false);setReviewMode(true);
           return;
         }
@@ -618,6 +631,11 @@ export default function ChessEngine(){
           const doNext=(uciMove,sfEval)=>{
             if(watchdog){clearTimeout(watchdog);watchdog=null;}
             if(analysisAbortRef.current){setAnalyzing(false);return;}
+            if(uciMove&&uciMove!=='(none)'&&uciMove.length>=4){
+              const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
+              const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
+              if(fc>=0&&fr>=0&&fr<8&&tc>=0&&tr>=0&&tr<8)bestMovesArr[idx]={f:fr*8+fc,t:tr*8+tc};
+            }
             evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
             idx++;
             setTimeout(next,30); // let event loop breathe between positions
@@ -768,12 +786,41 @@ export default function ChessEngine(){
           style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
           ↺ New Game
         </button>
-        <div style={{display:'flex',alignItems:'center',gap:10,marginLeft:'auto'}}>
+        <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
           <span style={{fontSize:12,color:'#666'}}>난이도</span>
-          <input type="range" min={0} max={9} value={di} onChange={e=>setDi(+e.target.value)}
-            style={{width:150,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
-          <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:108}}>{d.name}</span>
-          <span style={{fontSize:11,color:'#555'}}>{d.elo} · d{d.depth}</span>
+          <input type="range" min={0} max={18} value={di} onChange={e=>setDi(+e.target.value)}
+            style={{width:130,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
+          <input
+            type="number"
+            min={600} max={2400} step={1}
+            value={eloInput!==''?eloInput:d.elo}
+            onFocus={e=>{setEloInput(String(d.elo));e.target.select();}}
+            onChange={e=>{
+              const raw=e.target.value;
+              setEloInput(raw);
+              const v=parseInt(raw);
+              if(!isNaN(v)&&v>=600&&v<=2400){
+                const nearest=DIFFS.reduce((bi,di2,i)=>Math.abs(di2.elo-v)<Math.abs(DIFFS[bi].elo-v)?i:bi,0);
+                setDi(nearest);
+              }
+            }}
+            onKeyDown={e=>{
+              if(e.key==='Enter'){
+                const v=parseInt(e.target.value);
+                if(!isNaN(v)){
+                  const clamped=Math.max(600,Math.min(2400,v));
+                  const nearest=DIFFS.reduce((bi,di2,i)=>Math.abs(di2.elo-clamped)<Math.abs(DIFFS[bi].elo-clamped)?i:bi,0);
+                  setDi(nearest);
+                }
+                setEloInput('');
+                e.target.blur();
+              }
+            }}
+            onBlur={()=>setEloInput('')}
+            style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:'#e8d5b5',border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
+          />
+          <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
+          <span style={{fontSize:11,color:'#555'}}>d{d.depth}</span>
         </div>
       </div>
 
@@ -789,7 +836,7 @@ export default function ChessEngine(){
               <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
-                <div style={{fontSize:12,color:'#8a8580'}}>{d.name} · {d.elo}</div>
+                <div style={{fontSize:12,color:'#8a8580'}}>ELO {d.elo} · d{d.depth}</div>
               </div>
             </div>
             <div style={{display:'flex',alignItems:'center'}}>{renderCap(topCapDisp,topOrd,topAdv)}</div>
@@ -817,6 +864,21 @@ export default function ChessEngine(){
                     <polygon points="0 0,3 1.5,0 3" fill="rgba(60,220,130,0.88)"/></marker></defs>
                   <circle cx={x1} cy={y1} r="4" fill="rgba(60,220,130,0.2)" stroke="rgba(60,220,130,0.7)" strokeWidth="0.8"/>
                   <line x1={x1} y1={y1} x2={ex} y2={ey} stroke="rgba(60,220,130,0.82)" strokeWidth="1.8" markerEnd="url(#ha)" strokeLinecap="round"/>
+                </svg>);
+              })()}
+
+              {/* 복기 중 최선의 수 화살표 (파란색) */}
+              {viewIdx!==null&&viewIdx>0&&bestMoves[viewIdx-1]&&moveClassifications[viewIdx-1]?.grade!=='best'&&(()=>{
+                const bm=bestMoves[viewIdx-1];
+                const sc=(i)=>{const r=i>>3,c=i&7;return[(flip?7-c:c)*12.5+6.25,(flip?7-r:r)*12.5+6.25];};
+                const[x1,y1]=sc(bm.f);const[x2,y2]=sc(bm.t);
+                const dx=x2-x1,dy=y2-y1,len=Math.sqrt(dx*dx+dy*dy);
+                const ex=x2-dx/len*4,ey=y2-dy/len*4;
+                return(<svg style={{position:'absolute',inset:0,width:'100%',height:'100%',pointerEvents:'none',zIndex:5}} viewBox="0 0 100 100">
+                  <defs><marker id="bma" markerWidth="3" markerHeight="3" refX="1.5" refY="1.5" orient="auto">
+                    <polygon points="0 0,3 1.5,0 3" fill="rgba(100,180,255,0.88)"/></marker></defs>
+                  <circle cx={x1} cy={y1} r="4" fill="rgba(100,180,255,0.2)" stroke="rgba(100,180,255,0.7)" strokeWidth="0.8"/>
+                  <line x1={x1} y1={y1} x2={ex} y2={ey} stroke="rgba(100,180,255,0.82)" strokeWidth="1.8" markerEnd="url(#bma)" strokeLinecap="round"/>
                 </svg>);
               })()}
 
@@ -877,10 +939,14 @@ export default function ChessEngine(){
               const mc=moveClassifications[viewIdx-1];
               const gi=GRADE_INFO[mc.grade];
               return(
-                <div style={{display:'flex',alignItems:'center',gap:7,padding:'6px 12px',background:gi.color+'18',border:`1px solid ${gi.color}44`,borderRadius:7,marginBottom:6}}>
+                <div style={{display:'flex',alignItems:'center',gap:7,padding:'6px 12px',background:gi.color+'18',border:`1px solid ${gi.color}44`,borderRadius:7,marginBottom:6,flexWrap:'wrap'}}>
                   <span style={{fontSize:16}}>{gi.sym}</span>
                   <span style={{fontSize:14,fontWeight:700,color:gi.color,fontFamily:"'Space Mono',monospace"}}>{gi.label}</span>
                   <span style={{fontSize:11,color:'#8a8580',marginLeft:4}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
+                  {mc.grade!=='best'&&bestMoves[viewIdx-1]&&(()=>{
+                    const bm=bestMoves[viewIdx-1];
+                    return <span style={{fontSize:10,color:'rgba(100,180,255,0.9)',marginLeft:4,fontFamily:"'Space Mono',monospace"}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]}→{FL[bm.t&7]}{RL[bm.t>>3]}</span>;
+                  })()}
                   {!isLive&&<span style={{fontSize:10,color:'#f0c040',marginLeft:'auto',fontFamily:"'Space Mono',monospace"}}>복기 중</span>}
                 </div>
               );
