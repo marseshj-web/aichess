@@ -280,12 +280,22 @@ function boardToFEN(bd,col,ep,cas){
 // Convert UCI move string (e.g. "e2e4","e1g1","e7e8q") to internal move object
 function uciToMove(uci,bd,col,ep){
   const fc='abcdefgh'.indexOf(uci[0]),fr=8-parseInt(uci[1]);
-  const tc='abcdefgh'.indexOf(uci[2]),tr=8-parseInt(uci[3]);
-  const f=fr*8+fc,t=tr*8+tc,p=bd[f];
+  let tc='abcdefgh'.indexOf(uci[2]),tr=8-parseInt(uci[3]);
+  let f=fr*8+fc,t=tr*8+tc;
+  const p=bd[f];
+  
+  // Castling normalization (in case engine sends e8a8 instead of e8c8)
+  let cas=null;
+  if((p===WK||p===BK)&&Math.abs(tc-fc)>=2){
+    cas=tc>fc?'k':'q';
+    tc=cas==='k'?6:2; // Force to g-file (6) or c-file (2)
+    t=tr*8+tc;
+  }
+
   const m={f,t};
+  if(cas)m.cas=cas;
   if(uci[4]){const pm={q:col==='w'?WQ:BQ,r:col==='w'?WR:BR,b:col==='w'?WB:BB,n:col==='w'?WN:BN};m.pr=pm[uci[4]];}
   if(ep===t&&(p===WP||p===BP))m.ep=1;
-  if((p===WK||p===BK)&&Math.abs(tc-fc)===2)m.cas=tc>fc?'k':'q';
   if((p===WP||p===BP)&&Math.abs(tr-fr)===2)m.dbl=1;
   return m;
 }
@@ -297,10 +307,7 @@ async function getOpeningMove(fen){
     if(!res.ok)return null;
     const data=await res.json();
     if(data.moves&&data.moves.length>0){
-      const best=data.moves.reduce((a,b)=>
-        (a.white+a.draws+a.black)>(b.white+b.draws+b.black)?a:b
-      );
-      return best.uci;
+      return data.moves.map(m=>m.uci);
     }
   }catch(e){}
   return null;
@@ -342,7 +349,7 @@ export default function ChessEngine(){
   const[ep,setEp]=useState(null);
   const[cas,setCas]=useState('KQkq');
   const[over,setOver]=useState(null);
-  const[di,setDi]=useState(6);
+  const[elo,setElo]=useState(1200);
   const[eloInput,setEloInput]=useState('');
   const[thinking,setThinking]=useState(false);
   const[last,setLast]=useState(null);
@@ -370,7 +377,7 @@ export default function ChessEngine(){
   const eR=useRef(ep);eR.current=ep;
   const cR=useRef(cas);cR.current=cas;
   const pR=useRef(pc);pR.current=pc;
-  const dR=useRef(di);dR.current=di;
+  const eloR=useRef(elo);eloR.current=elo;
   const thR=useRef(thinking);thR.current=thinking;
   const oR=useRef(over);oR.current=over;
   const capWR=useRef(capW);capWR.current=capW;
@@ -449,7 +456,10 @@ export default function ChessEngine(){
     if(turn!==aiC||oR.current||thR.current)return;
     setThinking(true);
     const b=bR.current,e=eR.current,c=cR.current;
-    const d=DIFFS[dR.current];
+    
+    // Find nearest DIFFS entry for search parameters (depth, time)
+    const currentElo=eloR.current;
+    const d=DIFFS.reduce((prev,curr)=>Math.abs(curr.elo-currentElo)<Math.abs(prev.elo-currentElo)?curr:prev);
 
     if(sfReadyRef.current&&sfWorkerRef.current){
       let cancelled=false;
@@ -463,22 +473,24 @@ export default function ChessEngine(){
           if(uciMove&&uciMove!=='(none)'){
             const m=uciToMove(uciMove,b,aiC,e);
             setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
-            setSearchInfo(`Stockfish · skill ${DIFFS[dR.current].skill} · d${d.depth+4}`);
+            setSearchInfo(`Stockfish · ELO ${currentElo} · d${d.depth+4}`);
             applyMv(b,m,e,c,aiC);
           }
           setThinking(false);
         };
-        sfWorkerRef.current.postMessage(`setoption name Skill Level value ${DIFFS[dR.current].skill}`);
+        // Use UCI_Elo for fine-grained strength control
+        sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value true');
+        sfWorkerRef.current.postMessage(`setoption name UCI_Elo value ${currentElo}`);
         sfWorkerRef.current.postMessage(`position fen ${fen}`);
         sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
       };
 
-      // Opening book: Club(3) 이상 난이도, 20수 이내에서 Lichess master DB 조회
-      if(dR.current>=6&&histR.current.length<20){
-        getOpeningMove(fen).then(bookMove=>{
+      // Opening book: ELO 1200(Club) 이상 난이도, 20수 이내에서 Lichess master DB 조회
+      if(currentElo>=1200&&histR.current.length<20){
+        getOpeningMove(fen).then(bookMoves=>{
           if(cancelled)return;
-          if(bookMove){
-            const m=uciToMove(bookMove,b,aiC,e);
+          if(bookMoves&&bookMoves.length>0){
+            const m=uciToMove(bookMoves[0],b,aiC,e);
             setEvalScore(null);
             setSearchInfo('Opening Book');
             applyMv(b,m,e,c,aiC);
@@ -511,18 +523,18 @@ export default function ChessEngine(){
   },[turn,applyMv,gameKey]);
 
   const click=useCallback((idx)=>{
-    if(viewIdx!==null||turn!==pR.current||over||thinking)return;
-    const myP=pR.current==='w'?isW:isB;
-    const myPawn=pR.current==='w'?WP:BP;
-    const pRow=pR.current==='w'?0:7;
+    if(viewIdx!==null||turn!==pc||over||thinking)return;
+    const myP=pc==='w'?isW:isB;
+    const myPawn=pc==='w'?WP:BP;
+    const pRow=pc==='w'?0:7;
     if(sel!==null){
       const m=lm.find(m=>m.t===idx);
       if(m){if(board[sel]===myPawn&&toRC(idx)[0]===pRow){setPromo({f:sel,t:idx,mvs:lm.filter(m=>m.t===idx)});return}
-        applyMv(board,m,ep,cas,pR.current);setSel(null);setLm([]);return}
-      if(myP(board[idx])){setSel(idx);setLm(legal(board,pR.current,ep,cas).filter(m=>m.f===idx));return}
+        applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);return}
+      if(myP(board[idx])){setSel(idx);setLm(legal(board,pc,ep,cas).filter(m=>m.f===idx));return}
       setSel(null);setLm([]);return}
-    if(myP(board[idx])){setSel(idx);setLm(legal(board,pR.current,ep,cas).filter(m=>m.f===idx))}
-  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv,viewIdx]);
+    if(myP(board[idx])){setSel(idx);setLm(legal(board,pc,ep,cas).filter(m=>m.f===idx))}
+  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv,viewIdx,pc]);
 
   const doPromo=useCallback(m=>{applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);setPromo(null)},[board,ep,cas,pc,applyMv]);
   const swap=useCallback(()=>setPc(p=>p==='w'?'b':'w'),[]);
@@ -593,11 +605,11 @@ export default function ChessEngine(){
       const s=histStates[i];
       const fen=boardToFEN(s.board,s.turn,s.ep,s.cas);
       bookPromises.push(
-        getOpeningMove(fen).then(bookMove=>{
-          if(bookMove&&histStates[i+1]?.last){
+        getOpeningMove(fen).then(bookMoves=>{
+          if(bookMoves&&histStates[i+1]?.last){
             const last=histStates[i+1].last;
             const playedUCI=FL[last.f&7]+RL[last.f>>3]+FL[last.t&7]+RL[last.t>>3];
-            if(bookMove.startsWith(playedUCI))bookHits[i]=true;
+            if(bookMoves.some(m=>m.startsWith(playedUCI)))bookHits[i]=true;
           }
         }).catch(()=>{})
       );
@@ -704,12 +716,13 @@ export default function ChessEngine(){
   const chk=!over&&inChk(board,turn);
 
   // Eval bar – 500cp(5점) = 거의 꽉 참
+  const effectiveEval=viewIdx!==null?(analysisEvals[viewIdx]??null):evalScore;
   const evalPct=(()=>{
-    if(evalScore===null)return 50;
-    if(evalScore>=9999)return 96;if(evalScore<=-9999)return 4;
-    return Math.max(4,Math.min(96, 50+(evalScore/500)*46));
+    if(effectiveEval===null)return 50;
+    if(effectiveEval>=9999)return 96;if(effectiveEval<=-9999)return 4;
+    return Math.max(4,Math.min(96, 50+(effectiveEval/500)*46));
   })();
-  const evalText=evalScore===null?'0.0':Math.abs(evalScore)>=9999?(evalScore>0?'M+':'M-'):`${evalScore>0?'+':''}${(evalScore/100).toFixed(1)}`;
+  const evalText=effectiveEval===null?'0.0':Math.abs(effectiveEval)>=9999?(effectiveEval>0?'M+':'M-'):`${effectiveEval>0?'+':''}${(effectiveEval/100).toFixed(1)}`;
 
   // Navigation
   const effectiveIdx=viewIdx!==null?viewIdx:histStates.length-1;
@@ -768,7 +781,9 @@ export default function ChessEngine(){
   const topOrd=pc==='w'?B_ORD:W_ORD, botOrd=pc==='w'?W_ORD:B_ORD;
   const topAdv=pc==='w'?(displayMatAdv>0?displayMatAdv:0):(displayMatAdv<0?-displayMatAdv:0);
   const botAdv=pc==='w'?(displayMatAdv<0?-displayMatAdv:0):(displayMatAdv>0?displayMatAdv:0);
-  const d=DIFFS[di];
+  
+  // Find nearest difficulty setting for visual styles and search params
+  const d=DIFFS.reduce((prev,curr)=>Math.abs(curr.elo-elo)<Math.abs(prev.elo-elo)?curr:prev);
 
   return(
     <div style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",overflow:'hidden',color:'#e8e0d5'}}>
@@ -788,36 +803,32 @@ export default function ChessEngine(){
         </button>
         <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
           <span style={{fontSize:12,color:'#666'}}>난이도</span>
-          <input type="range" min={0} max={18} value={di} onChange={e=>setDi(+e.target.value)}
+          <input type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
             style={{width:130,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
           <input
             type="number"
             min={600} max={2400} step={1}
-            value={eloInput!==''?eloInput:d.elo}
-            onFocus={e=>{setEloInput(String(d.elo));e.target.select();}}
+            value={eloInput!==''?eloInput:elo}
+            onFocus={e=>{setEloInput(String(elo));e.target.select();}}
             onChange={e=>{
               const raw=e.target.value;
               setEloInput(raw);
               const v=parseInt(raw);
-              if(!isNaN(v)&&v>=600&&v<=2400){
-                const nearest=DIFFS.reduce((bi,di2,i)=>Math.abs(di2.elo-v)<Math.abs(DIFFS[bi].elo-v)?i:bi,0);
-                setDi(nearest);
-              }
+              if(!isNaN(v)&&v>=600&&v<=2400)setElo(v);
             }}
             onKeyDown={e=>{
               if(e.key==='Enter'){
                 const v=parseInt(e.target.value);
                 if(!isNaN(v)){
                   const clamped=Math.max(600,Math.min(2400,v));
-                  const nearest=DIFFS.reduce((bi,di2,i)=>Math.abs(di2.elo-clamped)<Math.abs(DIFFS[bi].elo-clamped)?i:bi,0);
-                  setDi(nearest);
+                  setElo(clamped);
                 }
                 setEloInput('');
                 e.target.blur();
               }
             }}
             onBlur={()=>setEloInput('')}
-            style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:'#e8d5b5',border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
+            style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:d.color,border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
           />
           <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
           <span style={{fontSize:11,color:'#555'}}>d{d.depth}</span>
@@ -836,7 +847,7 @@ export default function ChessEngine(){
               <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
-                <div style={{fontSize:12,color:'#8a8580'}}>ELO {d.elo} · d{d.depth}</div>
+                <div style={{fontSize:12,color:'#8a8580'}}>ELO {elo} · d{d.depth}</div>
               </div>
             </div>
             <div style={{display:'flex',alignItems:'center'}}>{renderCap(topCapDisp,topOrd,topAdv)}</div>
