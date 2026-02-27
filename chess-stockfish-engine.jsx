@@ -478,9 +478,16 @@ export default function ChessEngine(){
           }
           setThinking(false);
         };
-        // Use UCI_Elo for fine-grained strength control
-        sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value true');
-        sfWorkerRef.current.postMessage(`setoption name UCI_Elo value ${currentElo}`);
+        // Stockfish 16+ UCI_Elo has a minimum limit of 1320.
+        // For ELOs below 1320, we must rely on Skill Level (0-20) and depth/time limits.
+        if (currentElo >= 1320) {
+          sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value true');
+          sfWorkerRef.current.postMessage(`setoption name UCI_Elo value ${currentElo}`);
+        } else {
+          sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
+          sfWorkerRef.current.postMessage(`setoption name Skill Level value ${d.skill}`);
+        }
+        
         sfWorkerRef.current.postMessage(`position fen ${fen}`);
         sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
       };
@@ -678,37 +685,62 @@ export default function ChessEngine(){
     if(analysisEvals.length<2)return null;
     const W=400,H=150,MAXE=600,n=analysisEvals.length;
     const xS=i=>Math.round((i/(n-1))*W);
-    const yS=e=>{const c=Math.max(-MAXE,Math.min(MAXE,e??0));return Math.round(H/2-(c/MAXE)*(H/2-8));};
+    const yS=e=>{const c=Math.max(-MAXE,Math.min(MAXE,e??0));return Math.round(H/2-(c/MAXE)*(H/2-12));};
     const pts=analysisEvals.map((e,i)=>[xS(i),yS(e)]);
     const line=pts.map(([x,y],i)=>`${i===0?'M':'L'}${x} ${y}`).join(' ');
-    // Dark area: from eval line down to bottom = black's territory
-    const darkArea=`${line} L${xS(n-1)} ${H} L${xS(0)} ${H}Z`;
+    const fillArea=`${line} L${xS(n-1)} ${H} L${xS(0)} ${H}Z`;
     const GCOL={best:'#3cdc82',excellent:'#89d4f0',good:'#6abf69',inaccuracy:'#f0c040',mistake:'#e8a040',blunder:'#e05050'};
+    
     return(
-      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:'block',borderRadius:6}} preserveAspectRatio="none">
-        {/* White background = white's territory */}
-        <rect width={W} height={H} fill="#e8e0d5"/>
-        {/* Dark fill from eval line down = black's territory */}
-        <path d={darkArea} fill="#1a1816"/>
-        {/* Midline */}
-        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(100,90,80,0.35)" strokeWidth={1}/>
-        {/* Eval curve */}
-        <path d={line} fill="none" stroke="rgba(90,80,70,0.6)" strokeWidth={2}/>
+      <svg width="100%" viewBox={`0 0 ${W} ${H}`} style={{display:'block',borderRadius:8,background:'#111',boxShadow:'inset 0 0 20px rgba(0,0,0,0.8)'}} preserveAspectRatio="none">
+        <defs>
+          <linearGradient id="neonGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="#e8d5b5" stopOpacity="1" />
+            <stop offset="50%" stopColor="#f0c040" stopOpacity="0.8" />
+            <stop offset="100%" stopColor="#e05050" stopOpacity="1" />
+          </linearGradient>
+          <linearGradient id="glowFill" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stopColor="rgba(232,213,181,0.15)" />
+            <stop offset="50%" stopColor="rgba(240,192,64,0.05)" />
+            <stop offset="100%" stopColor="rgba(224,80,80,0.2)" />
+          </linearGradient>
+          <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+            <feGaussianBlur stdDeviation="3" result="blur" />
+            <feComposite in="SourceGraphic" in2="blur" operator="over" />
+          </filter>
+        </defs>
+
+        {/* Subtle grid lines */}
+        <line x1={0} y1={H/4} x2={W} y2={H/4} stroke="rgba(255,255,255,0.03)" strokeWidth={1}/>
+        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(255,255,255,0.15)" strokeWidth={1} strokeDasharray="4,4"/>
+        <line x1={0} y1={(H/4)*3} x2={W} y2={(H/4)*3} stroke="rgba(255,255,255,0.03)" strokeWidth={1}/>
+
+        {/* Graph Area Fill */}
+        <path d={fillArea} fill="url(#glowFill)" />
+        
+        {/* Main Neon Line */}
+        <path d={line} fill="none" stroke="url(#neonGrad)" strokeWidth={2.5} filter="url(#glow)"/>
+
+        {/* Current position glowing line */}
+        {effectiveIdx>=0&&effectiveIdx<n&&(
+          <g>
+            <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="rgba(240,192,64,0.4)" strokeWidth={4} filter="url(#glow)"/>
+            <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="#f0c040" strokeWidth={1.5}/>
+          </g>
+        )}
+
         {/* Move dots */}
         {moveClassifications.map((mc,i)=>{
           const x=xS(i+1),y=yS(analysisEvals[i+1]);
           const isCurrent=effectiveIdx===i+1;
+          const col=GCOL[mc.grade]||'#888';
           return(
             <g key={i} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}>
-              {isCurrent&&<circle cx={x} cy={y} r={10} fill={GCOL[mc.grade]+'35'} stroke={GCOL[mc.grade]} strokeWidth={2}/>}
-              <circle cx={x} cy={y} r={isCurrent?6:4} fill={GCOL[mc.grade]||'#888'} stroke="rgba(255,255,255,0.6)" strokeWidth={1.5}/>
+              {isCurrent&&<circle cx={x} cy={y} r={12} fill={col} opacity={0.2} filter="url(#glow)"/>}
+              <circle cx={x} cy={y} r={isCurrent?5.5:3.5} fill={isCurrent?col:'#222'} stroke={col} strokeWidth={isCurrent?2:1.5}/>
             </g>
           );
         })}
-        {/* Current position line */}
-        {effectiveIdx>=0&&effectiveIdx<n&&(
-          <line x1={xS(effectiveIdx)} y1={0} x2={xS(effectiveIdx)} y2={H} stroke="rgba(255,200,0,0.75)" strokeWidth={2} strokeDasharray="3,3"/>
-        )}
       </svg>
     );
   };
@@ -919,29 +951,30 @@ export default function ChessEngine(){
         </div>
 
         {/* ── Right panel ── */}
-        <div style={{width:400,background:'#1a1816',borderLeft:'1px solid rgba(255,255,255,0.1)',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0}}>
+        <div style={{width:400,background:'#111',borderLeft:'1px solid rgba(255,255,255,0.05)',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0,boxShadow:'-10px 0 30px rgba(0,0,0,0.5)'}}>
 
           {/* Panel header */}
-          <div style={{padding:'14px 20px',borderBottom:'1px solid rgba(255,255,255,0.08)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
-            <span style={{fontSize:19,color:'#f0c040'}}>⭐</span>
-            <span style={{fontSize:16,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace"}}>게임 리뷰</span>
+          <div style={{padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',background:'linear-gradient(to bottom, rgba(255,255,255,0.03), transparent)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
+            <span style={{fontSize:20,filter:'drop-shadow(0 0 5px rgba(240,192,64,0.5))'}}>📊</span>
+            <span style={{fontSize:17,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace",letterSpacing:1}}>분석 리포트</span>
+            {viewIdx!==null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)'}}>REVIEW MODE</span>}
           </div>
 
           {/* ── Controls section (always visible) ── */}
-          <div style={{padding:'12px 18px',borderBottom:'1px solid rgba(255,255,255,0.08)',flexShrink:0}}>
+          <div style={{padding:'14px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',flexShrink:0}}>
             {/* Status */}
-            <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:34,marginBottom:6}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:34,marginBottom:12}}>
               {over?(
-                <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.08)',border:'1px solid rgba(232,213,181,0.18)',borderRadius:8,padding:'6px 14px'}}>
-                  <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:14}}>{over}</span>
-                  <button onClick={()=>reset()} style={{padding:'5px 13px',background:'#e8d5b5',color:'#1a1816',border:'none',borderRadius:6,fontWeight:700,fontSize:12,cursor:'pointer'}}>Play Again</button>
+                <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.1)',border:'1px solid rgba(232,213,181,0.3)',borderRadius:8,padding:'8px 16px',boxShadow:'0 0 15px rgba(232,213,181,0.1)'}}>
+                  <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:15}}>{over}</span>
+                  <button onClick={()=>reset()} style={{padding:'6px 14px',background:'#e8d5b5',color:'#111',border:'none',borderRadius:6,fontWeight:800,fontSize:13,cursor:'pointer',boxShadow:'0 2px 8px rgba(0,0,0,0.3)'}}>Play Again</button>
                 </div>
               ):thinking?(
-                <><span style={{display:'inline-block',width:12,height:12,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/><span style={{color:'#f0c040',marginLeft:6,fontSize:14}}>AI thinking...</span></>
+                <><span style={{display:'inline-block',width:14,height:14,borderRadius:'50%',border:'2px solid #f0c040',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/></>
               ):chk?(
-                <span style={{color:'#e74c3c',fontWeight:700,fontSize:15}}>Check!</span>
+                <span style={{color:'#e05050',fontWeight:800,fontSize:16,textShadow:'0 0 10px rgba(224,80,80,0.5)',letterSpacing:1}}>CHECK!</span>
               ):(
-                <span style={{color:'#8a8580',fontSize:13}}>{turn==='w'?'White':'Black'} to move</span>
+                <span style={{color:'#8a8580',fontSize:14,fontWeight:600}}>{turn==='w'?'White':'Black'} to move</span>
               )}
             </div>
 
@@ -950,49 +983,50 @@ export default function ChessEngine(){
               const mc=moveClassifications[viewIdx-1];
               const gi=GRADE_INFO[mc.grade];
               return(
-                <div style={{display:'flex',alignItems:'center',gap:7,padding:'6px 12px',background:gi.color+'18',border:`1px solid ${gi.color}44`,borderRadius:7,marginBottom:6,flexWrap:'wrap'}}>
-                  <span style={{fontSize:16}}>{gi.sym}</span>
-                  <span style={{fontSize:14,fontWeight:700,color:gi.color,fontFamily:"'Space Mono',monospace"}}>{gi.label}</span>
-                  <span style={{fontSize:11,color:'#8a8580',marginLeft:4}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
+                <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:gi.color+'22',border:`1.5px solid ${gi.color}88`,borderRadius:10,marginBottom:12,flexWrap:'wrap',boxShadow:`0 4px 20px ${gi.color}15, inset 0 0 10px ${gi.color}10`}}>
+                  <span style={{fontSize:20,filter:`drop-shadow(0 0 4px ${gi.color}88)`}}>{gi.sym}</span>
+                  <span style={{fontSize:16,fontWeight:800,color:gi.color,fontFamily:"'Space Mono',monospace",textShadow:`0 0 8px ${gi.color}44`}}>{gi.label}</span>
+                  <span style={{fontSize:13,color:'#e8e0d5',marginLeft:6,fontWeight:600}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
                   {mc.grade!=='best'&&bestMoves[viewIdx-1]&&(()=>{
                     const bm=bestMoves[viewIdx-1];
-                    return <span style={{fontSize:10,color:'rgba(100,180,255,0.9)',marginLeft:4,fontFamily:"'Space Mono',monospace"}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]}→{FL[bm.t&7]}{RL[bm.t>>3]}</span>;
+                    return <div style={{width:'100%',marginTop:6,fontSize:12,color:'#89d4f0',fontFamily:"'Space Mono',monospace",fontWeight:700,paddingLeft:30,textShadow:'0 0 5px rgba(137,212,240,0.3)'}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]} → {FL[bm.t&7]}{RL[bm.t>>3]}</div>;
                   })()}
-                  {!isLive&&<span style={{fontSize:10,color:'#f0c040',marginLeft:'auto',fontFamily:"'Space Mono',monospace"}}>복기 중</span>}
                 </div>
               );
             })()}
 
             {/* Navigation */}
-            <div style={{display:'flex',alignItems:'center',gap:4,flexWrap:'wrap'}}>
+            <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
               <button onClick={()=>setViewIdx(0)} disabled={!canBack}
-                style={{padding:'7px 10px',background:'rgba(255,255,255,0.07)',color:canBack?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:15,cursor:canBack?'pointer':'default',lineHeight:1}}>⏮</button>
+                style={{padding:'8px 12px',background:canBack?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canBack?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:canBack?'pointer':'default',transition:'all 0.2s',boxShadow:canBack?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏮</button>
               <button onClick={goBack} disabled={!canBack}
-                style={{padding:'7px 12px',background:'rgba(255,255,255,0.07)',color:canBack?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:19,cursor:canBack?'pointer':'default',lineHeight:1}}>‹</button>
+                style={{padding:'8px 16px',background:canBack?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canBack?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:canBack?'pointer':'default',transition:'all 0.2s',boxShadow:canBack?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>‹</button>
               <button onClick={goFwd} disabled={!canFwd}
-                style={{padding:'7px 12px',background:'rgba(255,255,255,0.07)',color:canFwd?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:19,cursor:canFwd?'pointer':'default',lineHeight:1}}>›</button>
+                style={{padding:'8px 16px',background:canFwd?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canFwd?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:canFwd?'pointer':'default',transition:'all 0.2s',boxShadow:canFwd?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>›</button>
               <button onClick={()=>setViewIdx(null)} disabled={isLive}
-                style={{padding:'7px 10px',background:'rgba(255,255,255,0.07)',color:!isLive?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:15,cursor:!isLive?'pointer':'default',lineHeight:1}}>⏭</button>
-              <div style={{width:1,height:20,background:'rgba(255,255,255,0.1)',margin:'0 3px'}}/>
+                style={{padding:'8px 12px',background:!isLive?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:!isLive?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:!isLive?'pointer':'default',transition:'all 0.2s',boxShadow:!isLive?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏭</button>
+              
+              <div style={{width:1,height:24,background:'rgba(255,255,255,0.1)',margin:'0 4px'}}/>
+              
               {(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
                 <button onClick={handleUndo} disabled={!canUndo}
-                  style={{padding:'7px 11px',background:'rgba(255,255,255,0.07)',color:canUndo?'#ccc':'#3a3530',border:'1px solid rgba(255,255,255,0.09)',borderRadius:6,fontSize:12,cursor:canUndo?'pointer':'default',fontWeight:600}}>↩ 무르기</button>
+                  style={{padding:'8px 14px',background:canUndo?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canUndo?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:13,cursor:canUndo?'pointer':'default',fontWeight:700,transition:'all 0.2s'}}>↩ 무르기</button>
               );})()}
               {(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
                 <button onClick={handleHint} disabled={!canHint&&!active}
-                  style={{padding:'7px 11px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.07)',color:!canHint&&!active?'#3a3530':active?'#3cdc82':'#ccc',border:`1px solid ${active?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.09)'}`,borderRadius:6,fontSize:12,cursor:(canHint||active)?'pointer':'default',fontWeight:600,display:'flex',alignItems:'center',gap:4}}>
-                  {hintThinking?<span style={{display:'inline-block',width:9,height:9,borderRadius:'50%',border:'1.5px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
+                  style={{padding:'8px 14px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:!canHint&&!active?'#444':active?'#3cdc82':'#e8d5b5',border:`1px solid ${active?'rgba(60,220,130,0.5)':'rgba(255,255,255,0.1)'}`,borderRadius:8,fontSize:13,cursor:(canHint||active)?'pointer':'default',fontWeight:700,display:'flex',alignItems:'center',gap:6,transition:'all 0.2s',boxShadow:active?'0 0 10px rgba(60,220,130,0.2)':'none'}}>
+                  {hintThinking?<span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
                   {active?'끄기':'힌트'}
                 </button>
               );})()}
               {(()=>{const canSurr=!over&&!thinking&&isLive&&hist.length>0;return(
                 <button onClick={handleSurrender} disabled={!canSurr}
-                  style={{padding:'7px 11px',background:'rgba(220,60,60,0.12)',color:canSurr?'#e07070':'#3a3530',border:`1px solid ${canSurr?'rgba(220,60,60,0.3)':'rgba(255,255,255,0.06)'}`,borderRadius:6,fontSize:12,cursor:canSurr?'pointer':'default',fontWeight:600}}>
+                  style={{padding:'8px 14px',background:canSurr?'rgba(224,80,80,0.15)':'rgba(255,255,255,0.03)',color:canSurr?'#e05050':'#444',border:`1px solid ${canSurr?'rgba(224,80,80,0.4)':'rgba(255,255,255,0.1)'}`,borderRadius:8,fontSize:13,cursor:canSurr?'pointer':'default',fontWeight:700,transition:'all 0.2s'}}>
                   🏳 항복
                 </button>
               );})()}
             </div>
-            {searchInfo&&<div style={{fontSize:10,color:'#444',marginTop:4,fontFamily:"'Space Mono',monospace"}}>{searchInfo}</div>}
+            {searchInfo&&<div style={{fontSize:11,color:'#666',marginTop:8,fontFamily:"'Space Mono',monospace",textAlign:'right'}}>{searchInfo}</div>}
           </div>
 
           {/* Scrollable content */}
