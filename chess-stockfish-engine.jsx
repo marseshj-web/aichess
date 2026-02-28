@@ -997,9 +997,9 @@ export default function ChessEngine(){
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
         {!!piece&&<span className="chess-piece" style={{lineHeight:1,zIndex:1,
-          color:isW(piece)?'#f5f0e8':'#1a1a1a',
-          WebkitTextStroke:isW(piece)?'0.8px #4a3520':'0.5px #000',
-          filter:isW(piece)?'drop-shadow(1px 1px 2px rgba(0,0,0,0.5))':'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))'
+          color:isW(piece)?'#ffffff':'#111111',
+          WebkitTextStroke:isW(piece)?'1px #222':'1px #eee',
+          textShadow:isW(piece)?'0 2px 4px rgba(0,0,0,0.5)':'0 2px 4px rgba(0,0,0,0.5)'
         }}>{SYM[piece]}</span>}
         {ci===0&&<span style={{position:'absolute',top:2,left:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{RL[flip?7-ri:ri]}</span>}
         {ri===7&&<span style={{position:'absolute',bottom:1,right:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{FL[flip?7-ci:ci]}</span>}
