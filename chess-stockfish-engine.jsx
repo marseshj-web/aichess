@@ -300,16 +300,21 @@ function uciToMove(uci,bd,col,ep){
   return m;
 }
 
-// Lichess Opening Explorer: returns best UCI move for a FEN position, or null on failure
-async function getOpeningMove(fen){
+// Lichess Opening Explorer: returns opening info and moves for a FEN position, or null on failure
+async function getOpeningData(fen){
   try{
     const res=await fetch(`https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}&moves=5&topGames=0`,{signal:AbortSignal.timeout(2000)});
     if(!res.ok)return null;
     const data=await res.json();
-    if(data.moves&&data.moves.length>0){
-      return data.moves.map(m=>m.uci);
-    }
+    return data;
   }catch(e){}
+  return null;
+}
+
+// Helper to keep old behavior for AI/analysis
+async function getOpeningMove(fen){
+  const data=await getOpeningData(fen);
+  if(data&&data.moves&&data.moves.length>0)return data.moves.map(m=>m.uci);
   return null;
 }
 
@@ -390,6 +395,7 @@ export default function ChessEngine(){
   const[analysisProgress,setAnalysisProgress]=useState({current:0,total:0});
   const[reviewMode,setReviewMode]=useState(false);
   const[soundOn,setSoundOn]=useState(true);
+  const[openingInfo,setOpeningInfo]=useState(null);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -453,6 +459,7 @@ export default function ChessEngine(){
     analysisAbortRef.current=true;
     setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);setAnalyzing(false);
     setAnalysisProgress({current:0,total:0});setReviewMode(false);
+    setOpeningInfo(null);
     setGameKey(k=>k+1);
   },[]);
 
@@ -484,6 +491,28 @@ export default function ChessEngine(){
       else playSound('move');
     }
   },[]);
+
+  // Fetch opening info for current position
+  useEffect(()=>{
+    const idx = viewIdx !== null ? viewIdx : histStates.length - 1;
+    if(idx > 30) {
+      setOpeningInfo(null);
+      return;
+    }
+    const s = histStates[idx];
+    if(!s) return;
+    const fen = boardToFEN(s.board, s.turn, s.ep, s.cas);
+    let active = true;
+    getOpeningData(fen).then(data => {
+      if(!active) return;
+      if(data && (data.opening || (data.moves && data.moves.length > 0))) {
+        setOpeningInfo(data);
+      } else {
+        setOpeningInfo({ outOfBook: true });
+      }
+    });
+    return () => { active = false; };
+  },[viewIdx, histStates]);
 
   // AI turn – Stockfish preferred; built-in alpha-beta as fallback
   useEffect(()=>{
@@ -1228,6 +1257,51 @@ export default function ChessEngine(){
                   <div style={{color:'#555',fontSize:14,textAlign:'center',paddingTop:24}}>게임을 시작하세요</div>
                 ):(
                   <>
+                    {/* Opening Explorer */}
+                    {openingInfo && (
+                      <div style={{marginBottom: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: 12, border: '1px solid rgba(255,255,255,0.08)'}}>
+                        <div style={{fontSize: 11, color: '#e8a040', fontWeight: 700, letterSpacing: 0.5, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4}}>
+                          <span style={{fontSize: 14}}>📖</span> Opening Explorer
+                        </div>
+                        {openingInfo.outOfBook ? (
+                          <div style={{fontSize: 13, color: '#b0a898', fontStyle: 'italic'}}>Out of Book (오프닝 북에서 벗어남)</div>
+                        ) : (
+                          <>
+                            {openingInfo.opening && (
+                              <div style={{fontSize: 14, fontWeight: 700, color: '#e8e0d5', marginBottom: 8, lineHeight: 1.3}}>
+                                <span style={{color: '#89d4f0', marginRight: 6}}>{openingInfo.opening.eco}</span>
+                                {openingInfo.opening.name}
+                              </div>
+                            )}
+                            {openingInfo.moves && openingInfo.moves.length > 0 && (
+                              <div style={{display: 'flex', flexDirection: 'column', gap: 4}}>
+                                <div style={{fontSize:10, color:'#666', marginBottom:2}}>마스터들의 추천 수 (승/무/패)</div>
+                                {openingInfo.moves.slice(0, 3).map((m, i) => {
+                                  const total = m.white + m.draws + m.black;
+                                  const wp = (m.white / total) * 100;
+                                  const dp = (m.draws / total) * 100;
+                                  const bp = (m.black / total) * 100;
+                                  return (
+                                    <div key={i} style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: "'Space Mono',monospace"}}>
+                                      <div style={{width: 36, fontWeight: 700, color: '#e8d5b5', cursor:'pointer'}} 
+                                        onClick={()=>{if(isLive&&!thinking&&!over){const mObj=uciToMove(m.uci,board,turn,ep);if(mObj)applyMv(board,mObj,ep,cas,turn);}}}>
+                                        {m.san}
+                                      </div>
+                                      <div style={{flex: 1, display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', opacity: 0.9}}>
+                                        <div style={{width: `${wp}%`, background: '#e8d5b5'}} title={`White: ${Math.round(wp)}%`}/>
+                                        <div style={{width: `${dp}%`, background: '#8a8580'}} title={`Draw: ${Math.round(dp)}%`}/>
+                                        <div style={{width: `${bp}%`, background: '#333'}} title={`Black: ${Math.round(bp)}%`}/>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
                     <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
                       <div style={{fontSize:11,color:'#666',fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
                       <div style={{display:'flex',gap:6}}>
