@@ -504,7 +504,9 @@ export default function ChessEngine(){
     const s = histStates[idx];
     if(!s) return;
     const fen = boardToFEN(s.board, s.turn, s.ep, s.cas);
-    const shortFen = fen.split(' ').slice(0, 4).join(' '); // board turn cas ep
+    // The downloaded opening DB omits en-passant squares usually, so we search without it (set to '-')
+    const fenNoEp = boardToFEN(s.board, s.turn, null, s.cas);
+    const shortFen = fenNoEp.split(' ').slice(0, 4).join(' '); // board turn cas -
 
     // 1. Load local DB if not loaded
     const checkLocalAndFetch = async () => {
