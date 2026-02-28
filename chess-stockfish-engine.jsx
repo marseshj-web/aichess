@@ -925,11 +925,11 @@ export default function ChessEngine(){
       const isKC=isLive&&chk&&((turn==='w'&&piece===WK)||(turn==='b'&&piece===BK));
       let bg=lt?'#e8d5b5':'#b58863';
       if(isLst)bg=lt?'#f6f680':'#baca44';if(isSel)bg='#7fc97f';if(isKC)bg='#e74c3c';
-      sq.push(<div key={idx} onClick={()=>click(idx)}
+      sq.push(<div key={idx} onClick={()=>click(idx)} className="board-square"
         style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
-        {!!piece&&<span style={{fontSize:'min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px)',lineHeight:1,zIndex:1,
+        {!!piece&&<span className="chess-piece" style={{lineHeight:1,zIndex:1,
           color:isW(piece)?'#f5f0e8':'#1a1a1a',
           WebkitTextStroke:isW(piece)?'0.8px #4a3520':'0.5px #000',
           filter:isW(piece)?'drop-shadow(1px 1px 2px rgba(0,0,0,0.5))':'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))'
@@ -1301,6 +1301,7 @@ export default function ChessEngine(){
         .player-row { width:min(calc(100vh - 142px), calc(100vw - 438px), 742px); }
         .chess-board { width:min(calc(100vh - 184px), calc(100vw - 480px), 700px); height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
         .eval-bar { height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
+        .chess-piece { font-size: min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px); }
 
         /* Responsive Mobile Layout */
         @media (max-width: 900px) {
@@ -1317,6 +1318,7 @@ export default function ChessEngine(){
           .player-row { width: 100%; max-width: 600px; }
           .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
           .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
+          .chess-piece { font-size: calc((100vw - 52px) / 8 * 0.75); max-font-size: 56px; }
           
           .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
         }
