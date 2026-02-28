@@ -1289,6 +1289,83 @@ export default function ChessEngine(){
                     );
                   })}
                 </div>
+
+                {/* Coach Report */}
+                {(()=>{
+                  const myMoves = moveClassifications.map((m, i) => ({...m, idx: i})).filter(m => m.player === pc);
+                  if (!myMoves.length) return null;
+                  
+                  const acc = parseFloat(calcAccuracy(myMoves));
+                  const estimatedElo = Math.min(2800, Math.max(400, Math.round(acc * 35 - 900)));
+                  
+                  const opening = myMoves.filter(m => Math.floor(m.idx / 2) < 15);
+                  const middle = myMoves.filter(m => Math.floor(m.idx / 2) >= 15 && Math.floor(m.idx / 2) < 30);
+                  const end = myMoves.filter(m => Math.floor(m.idx / 2) >= 30);
+                  
+                  const getAvgCp = arr => arr.length ? arr.reduce((s, m) => s + m.cpLoss, 0) / arr.length : 0;
+                  const opCp = getAvgCp(opening);
+                  const midCp = getAvgCp(middle);
+                  const endCp = getAvgCp(end);
+                  
+                  const comments = [];
+                  if (opCp < 30 && opening.length > 5) comments.push("초반 오프닝이 매우 단단합니다.");
+                  else if (opCp > 80) comments.push("오프닝 전개 과정에서 손실이 컸습니다.");
+                  
+                  if (midCp < 40 && middle.length > 5) comments.push("중반부 전술적 대처가 뛰어납니다.");
+                  else if (midCp > 100) comments.push("중반 전술 싸움에서 집중력이 아쉽습니다.");
+                  
+                  if (endCp > 100 && end.length > 5) comments.push("엔드게임 마무리에 주의가 필요합니다.");
+                  
+                  const blunders = myMoves.filter(m => m.grade === 'blunder').length;
+                  if (blunders >= 2) comments.push("치명적인 블런더를 줄이는 연습이 필요합니다.");
+                  
+                  if (comments.length === 0) comments.push("전반적으로 무난한 대국이었습니다.");
+                  
+                  const criticalMoves = [...myMoves].sort((a, b) => b.cpLoss - a.cpLoss).slice(0, 2).filter(m => m.cpLoss > 150);
+                  
+                  return (
+                    <div style={{marginTop: 20, padding: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)'}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12}}>
+                        <span style={{fontSize: 20}}>🤖</span>
+                        <span style={{fontSize: 15, fontWeight: 700, color: '#e8d5b5'}}>코치 리포트</span>
+                      </div>
+                      
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, background: 'rgba(0,0,0,0.3)', padding: '10px 14px', borderRadius: 8}}>
+                        <span style={{fontSize: 13, color: '#b0a898'}}>예상 퍼포먼스 ELO</span>
+                        <span style={{fontSize: 20, fontWeight: 700, color: '#f0c040', fontFamily: "'Space Mono',monospace"}}>{estimatedElo}</span>
+                      </div>
+                      
+                      <ul style={{margin: 0, paddingLeft: 20, color: '#e8e0d5', fontSize: 13, lineHeight: 1.6, marginBottom: criticalMoves.length ? 14 : 0}}>
+                        {comments.map((c, i) => <li key={i} style={{marginBottom: 4}}>{c}</li>)}
+                      </ul>
+                      
+                      {criticalMoves.length > 0 && (
+                        <div>
+                          <div style={{fontSize: 12, color: '#8a8580', marginBottom: 8}}>결정적 분기점 (치명적 실수)</div>
+                          <div style={{display: 'flex', flexDirection: 'column', gap: 6}}>
+                            {criticalMoves.map(m => {
+                              const turnNum = Math.floor(m.idx / 2) + 1;
+                              const isWhite = m.idx % 2 === 0;
+                              return (
+                                <div key={m.idx} onClick={() => setViewIdx(m.idx + 1)} style={{display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'rgba(224,80,80,0.1)', border: '1px solid rgba(224,80,80,0.3)', borderRadius: 6, cursor: 'pointer', transition: 'all 0.2s'}}>
+                                  <span style={{fontSize: 13, color: '#e8e0d5', fontFamily: "'Space Mono',monospace", width: 40}}>
+                                    {turnNum}.{isWhite ? ' ' : '...'}
+                                  </span>
+                                  <span style={{fontSize: 13, color: '#e05050', fontWeight: 700}}>
+                                    {hist[m.idx]}
+                                  </span>
+                                  <span style={{fontSize: 12, color: '#b0a898', marginLeft: 'auto'}}>
+                                    -{(m.cpLoss / 100).toFixed(1)}점
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             ):(
               // Move history
