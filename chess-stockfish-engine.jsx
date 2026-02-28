@@ -949,28 +949,34 @@ export default function ChessEngine(){
   const d=DIFFS.reduce((prev,curr)=>Math.abs(curr.elo-elo)<Math.abs(prev.elo-elo)?curr:prev);
 
   return(
-    <div style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",overflow:'hidden',color:'#e8e0d5'}}>
+    <div className="app-container" style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",color:'#e8e0d5'}}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@700&display=swap" rel="stylesheet"/>
 
       {/* ── Top bar ── */}
-      <div style={{height:52,background:'#1a1816',borderBottom:'1px solid rgba(255,255,255,0.1)',display:'flex',alignItems:'center',padding:'0 20px',gap:10,flexShrink:0}}>
-        <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',fontSize:17,marginRight:2}}>♚ Chess Arena</span>
-        <span style={{fontSize:11,color:'#e8a040',marginRight:10}}>Enhanced Engine</span>
-        <button onClick={swap}
-          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-          {pc==='w'?'♔ White':'♚ Black'} ⇄
-        </button>
-        <button onClick={()=>reset()}
-          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-          ↺ New Game
-        </button>
-        <button onClick={()=>setSoundOn(!soundOn)}
-          style={{padding:'7px 12px',background:soundOn?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:soundOn?'#3cdc82':'#888',border:`1px solid ${soundOn?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}>
-          {soundOn?'🔊':'🔇'}
-        </button>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
-          <span style={{fontSize:12,color:'#666'}}>난이도</span>
-          <input type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
+      <div className="top-bar">
+        <div className="top-title">
+          <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',fontSize:17}}>♚ Chess Arena</span>
+          <span className="hide-on-mobile" style={{fontSize:11,color:'#e8a040'}}>Enhanced Engine</span>
+        </div>
+        
+        <div className="top-buttons">
+          <button onClick={swap}
+            style={{padding:'7px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap'}}>
+            {pc==='w'?'♔ White':'♚ Black'} <span className="hide-on-mobile">⇄</span>
+          </button>
+          <button onClick={()=>reset()}
+            style={{padding:'7px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap'}}>
+            <span className="hide-on-mobile">↺ </span>New<span className="hide-on-mobile"> Game</span>
+          </button>
+          <button onClick={()=>setSoundOn(!soundOn)}
+            style={{padding:'7px 12px',background:soundOn?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:soundOn?'#3cdc82':'#888',border:`1px solid ${soundOn?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}>
+            {soundOn?'🔊':'🔇'}
+          </button>
+        </div>
+        
+        <div className="elo-controls" style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
+          <span className="hide-on-mobile" style={{fontSize:12,color:'#666'}}>난이도</span>
+          <input className="hide-on-mobile" type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
             style={{width:130,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
           <input
             type="number"
@@ -997,19 +1003,19 @@ export default function ChessEngine(){
             onBlur={()=>setEloInput('')}
             style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:d.color,border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
           />
-          <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
+          <span className="hide-on-mobile" style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
           <span style={{fontSize:11,color:'#555'}}>d{d.depth}</span>
         </div>
       </div>
 
       {/* ── Main layout ── */}
-      <div style={{flex:1,display:'flex',overflow:'hidden',minHeight:0}}>
+      <div className="main-layout" style={{flex:1,display:'flex',minHeight:0}}>
 
         {/* ── Board section ── */}
-        <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px',minWidth:0}}>
+        <div className="board-section" style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px'}}>
 
           {/* Opponent row */}
-          <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div className="player-row top" style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
               <div>
@@ -1021,15 +1027,15 @@ export default function ChessEngine(){
           </div>
 
           {/* Eval bar + Board */}
-          <div style={{display:'flex',alignItems:'stretch'}}>
+          <div style={{display:'flex',alignItems:'stretch',width:'100%',justifyContent:'center'}}>
             {/* Eval bar */}
-            <div style={{width:42,height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
+            <div className="eval-bar" style={{width:42,borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
               <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#1a1816':'#e8e0d0',transition:'height 0.6s ease'}}/>
               <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:12,fontWeight:700,color:'#e8e0d5',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace",textShadow:'0 0 6px #000,0 0 12px #000'}}>{evalText}</div>
             </div>
 
             {/* Board */}
-            <div style={{width:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',display:'flex',flexWrap:'wrap',borderRadius:'0 5px 5px 0',overflow:'hidden',boxShadow:'0 10px 50px rgba(0,0,0,0.7)',position:'relative'}}>
+            <div className="chess-board" style={{display:'flex',flexWrap:'wrap',borderRadius:'0 5px 5px 0',overflow:'hidden',boxShadow:'0 10px 50px rgba(0,0,0,0.7)',position:'relative'}}>
               {renderBoard()}
 
               {hintMove&&(()=>{
@@ -1283,6 +1289,37 @@ export default function ChessEngine(){
         ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:3px}
         input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5)}
         input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer}
+        
+        /* Default Desktop Layout */
+        .top-bar { height:52px; background:#1a1816; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; padding:0 20px; gap:10px; flex-shrink:0; }
+        .top-title { display:flex; align-items:baseline; gap:10px; margin-right:2px; }
+        .top-buttons { display:flex; gap:10px; }
+        .elo-controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
+        .main-layout { flex:1; display:flex; flex-direction:row; overflow:hidden; min-height:0; }
+        .board-section { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:10px 20px; min-width:0; }
+        .right-panel { width:400px; background:#111; border-left:1px solid rgba(255,255,255,0.05); display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; box-shadow:-10px 0 30px rgba(0,0,0,0.5); }
+        .player-row { width:min(calc(100vh - 142px), calc(100vw - 438px), 742px); }
+        .chess-board { width:min(calc(100vh - 184px), calc(100vw - 480px), 700px); height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
+        .eval-bar { height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
+
+        /* Responsive Mobile Layout */
+        @media (max-width: 900px) {
+          .hide-on-mobile { display: none !important; }
+          .top-bar { padding: 0 10px; gap: 6px; justify-content: space-between; }
+          .top-buttons { gap: 6px; }
+          .top-title { margin-right: 0; }
+          .elo-controls { margin-left: 0; }
+          
+          .main-layout { flex-direction: column; overflow-y: auto; }
+          .board-section { padding: 10px 5px; flex: none; }
+          .right-panel { width: 100%; border-left: none; border-top: 1px solid rgba(255,255,255,0.1); flex: none; height: auto; min-height: 400px; box-shadow: none; }
+          
+          .player-row { width: 100%; max-width: 600px; }
+          .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
+          .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
+          
+          .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
+        }
       `}</style>
     </div>
   );
