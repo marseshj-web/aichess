@@ -364,6 +364,8 @@ const playSound = (type) => {
 // ═══════════════════════════════════════════════════
 // REACT COMPONENT
 // ═══════════════════════════════════════════════════
+let localOpeningsDB = null;
+
 export default function ChessEngine(){
   const[board,setBoard]=useState(initBoard);
   const[turn,setTurn]=useState('w');
@@ -502,16 +504,52 @@ export default function ChessEngine(){
     const s = histStates[idx];
     if(!s) return;
     const fen = boardToFEN(s.board, s.turn, s.ep, s.cas);
-    let active = true;
-    getOpeningData(fen).then(data => {
-      if(!active) return;
-      if(data && (data.opening || (data.moves && data.moves.length > 0))) {
-        setOpeningInfo(data);
-      } else {
-        setOpeningInfo({ outOfBook: true });
+    const shortFen = fen.split(' ').slice(0, 4).join(' '); // board turn cas ep
+
+    // 1. Load local DB if not loaded
+    const checkLocalAndFetch = async () => {
+      if (!localOpeningsDB) {
+        try {
+          const res = await fetch('/openings.json');
+          if (res.ok) {
+            localOpeningsDB = await res.json();
+          }
+        } catch(e) { console.warn('Failed to load local openings', e); }
       }
-    });
-    return () => { active = false; };
+
+      // 2. Check local DB first for instant response
+      let localMatch = null;
+      if (localOpeningsDB && localOpeningsDB[shortFen]) {
+        localMatch = localOpeningsDB[shortFen];
+        // Instantly show local name
+        setOpeningInfo(prev => ({ ...prev, opening: localMatch, outOfBook: false }));
+      } else {
+        // If not in local DB, it might be out of book, but we wait for Lichess to confirm
+        setOpeningInfo(prev => prev ? { ...prev, outOfBook: false } : { outOfBook: false });
+      }
+
+      // 3. Fetch Lichess API for move statistics (silently in background)
+      let active = true;
+      getOpeningData(fen).then(data => {
+        if(!active) return;
+        if(data && (data.opening || (data.moves && data.moves.length > 0))) {
+          setOpeningInfo({
+            opening: localMatch || data.opening, // Prefer local name if available
+            moves: data.moves,
+            outOfBook: false
+          });
+        } else {
+          // Only mark out of book if both local and Lichess fail
+          if (!localMatch) {
+            setOpeningInfo({ outOfBook: true });
+          }
+        }
+      });
+      return () => { active = false; };
+    };
+
+    const cleanup = checkLocalAndFetch();
+    return () => { cleanup.then(c => c && c()); };
   },[viewIdx, histStates]);
 
   // AI turn – Stockfish preferred; built-in alpha-beta as fallback
