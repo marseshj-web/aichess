@@ -339,6 +339,24 @@ function calcAccuracy(moves){
 }
 
 // ═══════════════════════════════════════════════════
+// SOUNDS
+// ═══════════════════════════════════════════════════
+const SOUNDS = typeof Audio !== 'undefined' ? {
+  move: new Audio('/sounds/move.mp3'),
+  capture: new Audio('/sounds/capture.mp3'),
+  check: new Audio('/sounds/check.mp3'),
+  castle: new Audio('/sounds/castle.mp3'),
+  gameEnd: new Audio('/sounds/gameEnd.mp3')
+} : {};
+
+const playSound = (type) => {
+  if (SOUNDS[type]) {
+    const s = SOUNDS[type].cloneNode();
+    s.play().catch(e => console.log('Audio playback prevented:', e));
+  }
+};
+
+// ═══════════════════════════════════════════════════
 // REACT COMPONENT
 // ═══════════════════════════════════════════════════
 export default function ChessEngine(){
@@ -371,6 +389,7 @@ export default function ChessEngine(){
   const[analyzing,setAnalyzing]=useState(false);
   const[analysisProgress,setAnalysisProgress]=useState({current:0,total:0});
   const[reviewMode,setReviewMode]=useState(false);
+  const[soundOn,setSoundOn]=useState(true);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -384,6 +403,7 @@ export default function ChessEngine(){
   const capBR=useRef(capB);capBR.current=capB;
   const histR=useRef(hist);histR.current=hist;
   const analysisAbortRef=useRef(false);
+  const soundOnRef=useRef(soundOn);soundOnRef.current=soundOn;
 
   // Stockfish worker refs (engine state, not React state)
   const sfWorkerRef=useRef(null);
@@ -447,7 +467,22 @@ export default function ChessEngine(){
     setHistStates(p=>[...p,{board:nb,turn:nx,ep:ne,cas:nc,last:{f:m.f,t:m.t},capW:newCapW,capB:newCapB}]);
     setViewIdx(null);setHintMove(null);
     setTurn(nx);
-    if(!legal(nb,nx,ne,nc).length){if(inChk(nb,nx))setOver(col==='w'?'White wins!':'Black wins!');else setOver('Stalemate')}
+    
+    let isEnd=false;
+    const isChk=inChk(nb,nx);
+    if(!legal(nb,nx,ne,nc).length){
+      if(isChk)setOver(col==='w'?'White wins!':'Black wins!');
+      else setOver('Stalemate');
+      isEnd=true;
+    }
+    
+    if(soundOnRef.current){
+      if(isEnd)playSound('gameEnd');
+      else if(isChk)playSound('check');
+      else if(m.cas)playSound('castle');
+      else if(cap||m.ep)playSound('capture');
+      else playSound('move');
+    }
   },[]);
 
   // AI turn – Stockfish preferred; built-in alpha-beta as fallback
@@ -833,6 +868,10 @@ export default function ChessEngine(){
           style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
           ↺ New Game
         </button>
+        <button onClick={()=>setSoundOn(!soundOn)}
+          style={{padding:'7px 12px',background:soundOn?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:soundOn?'#3cdc82':'#888',border:`1px solid ${soundOn?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}>
+          {soundOn?'🔊':'🔇'}
+        </button>
         <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
           <span style={{fontSize:12,color:'#666'}}>난이도</span>
           <input type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
@@ -983,14 +1022,13 @@ export default function ChessEngine(){
               const mc=moveClassifications[viewIdx-1];
               const gi=GRADE_INFO[mc.grade];
               return(
-                <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:gi.color+'22',border:`1.5px solid ${gi.color}88`,borderRadius:10,marginBottom:12,flexWrap:'wrap',boxShadow:`0 4px 20px ${gi.color}15, inset 0 0 10px ${gi.color}10`}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:gi.color+'22',border:`1.5px solid ${gi.color}88`,borderRadius:10,marginBottom:12,flexWrap:'wrap',boxShadow:`0 4px 20px ${gi.color}15, inset 0 0 10px ${gi.color}10`, minHeight: '74px', boxSizing: 'border-box', alignContent: 'flex-start'}}>
                   <span style={{fontSize:20,filter:`drop-shadow(0 0 4px ${gi.color}88)`}}>{gi.sym}</span>
                   <span style={{fontSize:16,fontWeight:800,color:gi.color,fontFamily:"'Space Mono',monospace",textShadow:`0 0 8px ${gi.color}44`}}>{gi.label}</span>
                   <span style={{fontSize:13,color:'#e8e0d5',marginLeft:6,fontWeight:600}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
-                  {mc.grade!=='best'&&bestMoves[viewIdx-1]&&(()=>{
-                    const bm=bestMoves[viewIdx-1];
-                    return <div style={{width:'100%',marginTop:6,fontSize:12,color:'#89d4f0',fontFamily:"'Space Mono',monospace",fontWeight:700,paddingLeft:30,textShadow:'0 0 5px rgba(137,212,240,0.3)'}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]} → {FL[bm.t&7]}{RL[bm.t>>3]}</div>;
-                  })()}
+                  <div style={{width:'100%',marginTop:4,fontSize:12,color:'#89d4f0',fontFamily:"'Space Mono',monospace",fontWeight:700,paddingLeft:30,textShadow:'0 0 5px rgba(137,212,240,0.3)', visibility: (mc.grade!=='best'&&bestMoves[viewIdx-1]) ? 'visible' : 'hidden'}}>
+                    {mc.grade!=='best'&&bestMoves[viewIdx-1] ? `최선: ${FL[bestMoves[viewIdx-1].f&7]}${RL[bestMoves[viewIdx-1].f>>3]} → ${FL[bestMoves[viewIdx-1].t&7]}${RL[bestMoves[viewIdx-1].t>>3]}` : '최선:'}
+                  </div>
                 </div>
               );
             })()}
