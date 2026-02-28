@@ -625,6 +625,102 @@ export default function ChessEngine(){
     setOver(pc==='w'?'Black wins!':'White wins!');
   },[over,thinking,pc]);
 
+  const handleExportPGN=useCallback(()=>{
+    if(histStates.length<2)return;
+    const moves=[];
+    for(let i=1;i<histStates.length;i++){
+      const m=histStates[i].last;
+      let uci=FL[m.f&7]+RL[m.f>>3]+FL[m.t&7]+RL[m.t>>3];
+      if(histStates[i].board[m.t]===WQ&&m.t<8&&m.f>=8)uci+='q'; // basic promo handling
+      else if(histStates[i].board[m.t]===BQ&&m.t>=56&&m.f<56)uci+='q';
+      moves.push(uci);
+    }
+    const pgn=moves.reduce((acc,curr,idx)=>{
+      if(idx%2===0)return acc+`${Math.floor(idx/2)+1}. ${curr} `;
+      return acc+`${curr} `;
+    },'').trim();
+    
+    navigator.clipboard.writeText(pgn).then(()=>{
+      alert('PGN(UCI 형식)이 클립보드에 복사되었습니다.');
+    }).catch(e=>console.error('PGN export failed:',e));
+  },[histStates]);
+
+  const handleImportPGN=useCallback(()=>{
+    if(thinking)return;
+    const input=prompt('PGN(UCI 형식, 예: 1. e2e4 e7e5) 텍스트를 입력하세요:');
+    if(!input)return;
+    
+    // Clean string and extract UCI moves
+    const clean=input.replace(/\d+\./g,'').replace(/\s+/g,' ').trim();
+    const tokens=clean.split(' ').filter(t=>t.length>=4&&t.length<=5);
+    
+    if(tokens.length===0){
+      alert('유효한 기보를 찾을 수 없습니다.');
+      return;
+    }
+
+    // Reset board first
+    reset();
+    
+    // We need to apply moves sequentially. 
+    // Since we are not using full Stockfish for import to avoid complexity in this step,
+    // we'll apply them using our internal engine logic sequentially with a small delay.
+    let currentBoard=initBoard();
+    let currentTurn='w';
+    let currentEp=null;
+    let currentCas='KQkq';
+    let validMoves=0;
+    
+    const applyNext=(idx)=>{
+      if(idx>=tokens.length){
+        setGameKey(k=>k+1); // Force full re-render
+        return;
+      }
+      
+      const uci=tokens[idx];
+      const m=uciToMove(uci,currentBoard,currentTurn,currentEp);
+      
+      // Safety check: is it a pseudo-legal move structure?
+      if(!m||m.f<0||m.t<0||m.f>63||m.t>63){
+        console.warn('Invalid move in sequence:',uci);
+        return;
+      }
+
+      const cap=currentBoard[m.t];
+      const nb=doMv(currentBoard,m);
+      const nc=updCas(currentCas,m,currentBoard);
+      const ne=nextEp(m);
+      const nx=currentTurn==='w'?'b':'w';
+      
+      currentBoard=nb;
+      currentTurn=nx;
+      currentEp=ne;
+      currentCas=nc;
+      validMoves++;
+
+      setBoard(currentBoard);setCas(currentCas);setEp(currentEp);setLast({f:m.f,t:m.t});
+      setTurn(currentTurn);
+      setHist(p=>[...p,`${SYM[currentBoard[m.f]]||''}${FL[m.f&7]}${RL[m.f>>3]}→${FL[m.t&7]}${RL[m.t>>3]}`]);
+      
+      // Update history state
+      setHistStates(p=>{
+        const prevCapW=p.length>0?p[p.length-1].capW:[];
+        const prevCapB=p.length>0?p[p.length-1].capB:[];
+        const newCapW=[...prevCapW,...(cap&&isW(cap)?[cap]:[]),...(m.ep&&nx==='w'?[WP]:[])];
+        const newCapB=[...prevCapB,...(cap&&isB(cap)?[cap]:[]),...(m.ep&&nx==='b'?[BP]:[])];
+        setCapW(newCapW);setCapB(newCapB);
+        return [...p,{board:currentBoard,turn:currentTurn,ep:currentEp,cas:currentCas,last:{f:m.f,t:m.t},capW:newCapW,capB:newCapB}];
+      });
+
+      // Continue to next move rapidly
+      setTimeout(()=>applyNext(idx+1),20);
+    };
+    
+    // Start sequence
+    setTimeout(()=>applyNext(0),100);
+    
+  },[thinking,reset]);
+
   const runAnalysis=useCallback(()=>{
     if(analyzing||histStates.length<2)return;
     analysisAbortRef.current=false;
@@ -996,7 +1092,12 @@ export default function ChessEngine(){
           <div style={{padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',background:'linear-gradient(to bottom, rgba(255,255,255,0.03), transparent)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
             <span style={{fontSize:20,filter:'drop-shadow(0 0 5px rgba(240,192,64,0.5))'}}>📊</span>
             <span style={{fontSize:17,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace",letterSpacing:1}}>분석 리포트</span>
-            {viewIdx!==null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)'}}>REVIEW MODE</span>}
+            
+            <div style={{marginLeft:'auto',display:'flex',gap:6,alignItems:'center'}}>
+              {!thinking&&<button onClick={handleImportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'4px 6px',borderRadius:4,cursor:'pointer',fontWeight:700,transition:'all 0.2s'}}>📥 불러오기</button>}
+              {histStates.length>1&&<button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'4px 6px',borderRadius:4,cursor:'pointer',fontWeight:700,transition:'all 0.2s'}}>📋 내보내기</button>}
+              {viewIdx!==null&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)',marginLeft:4}}>REVIEW</span>}
+            </div>
           </div>
 
           {/* ── Controls section (always visible) ── */}
@@ -1121,7 +1222,13 @@ export default function ChessEngine(){
                   <div style={{color:'#555',fontSize:14,textAlign:'center',paddingTop:24}}>게임을 시작하세요</div>
                 ):(
                   <>
-                    <div style={{fontSize:11,color:'#666',marginBottom:8,fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                      <div style={{fontSize:11,color:'#666',fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
+                      <div style={{display:'flex',gap:6}}>
+                        <button onClick={handleImportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'3px 6px',borderRadius:4,cursor:'pointer',fontWeight:700}}>📥 불러오기</button>
+                        <button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'3px 6px',borderRadius:4,cursor:'pointer',fontWeight:700}}>📋 내보내기</button>
+                      </div>
+                    </div>
                     <div style={{display:'flex',flexDirection:'column',gap:1}}>
                       {Array.from({length:Math.ceil(hist.length/2)}).map((_,i)=>{
                         const w=hist[i*2],b=hist[i*2+1];
