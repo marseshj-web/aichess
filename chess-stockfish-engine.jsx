@@ -300,6 +300,22 @@ function uciToMove(uci,bd,col,ep){
   return m;
 }
 
+// Parse principal variation (PV) from a Stockfish info line into full move objects array
+function parsePV(pvLine,bd,col,ep){
+  const m=pvLine.match(/\bpv\s+((?:[a-h][1-8][a-h][1-8][qrbn]?\s*)+)/);
+  if(!m)return[];
+  const tokens=m[1].trim().split(/\s+/).slice(0,8);
+  const moves=[];let curBd=bd,curCol=col,curEp=ep;
+  for(const uci of tokens){
+    try{
+      const mv=uciToMove(uci,curBd,curCol,curEp);
+      moves.push(mv);
+      curBd=doMv(curBd,mv);curEp=nextEp(mv);curCol=curCol==='w'?'b':'w';
+    }catch(e){break;}
+  }
+  return moves;
+}
+
 // Lichess Opening Explorer: returns best UCI move for a FEN position, or null on failure
 async function getOpeningMove(fen){
   try{
@@ -371,6 +387,8 @@ export default function ChessEngine(){
   const[analyzing,setAnalyzing]=useState(false);
   const[analysisProgress,setAnalysisProgress]=useState({current:0,total:0});
   const[reviewMode,setReviewMode]=useState(false);
+  const[pvExploreStates,setPvExploreStates]=useState(null);
+  const[pvExploreIdx,setPvExploreIdx]=useState(null);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -390,6 +408,9 @@ export default function ChessEngine(){
   const sfReadyRef=useRef(false);
   const sfCallbackRef=useRef(null);
   const sfEvalRef=useRef(null);
+  const sfPVRef=useRef('');
+  const sfLiveEvalRef=useRef(false);
+  const sfAiSideRef=useRef(null);
 
   const ac=pc==='w'?'b':'w';
   const flip=pc==='b';
@@ -403,15 +424,27 @@ export default function ChessEngine(){
         const line=typeof e.data==='string'?e.data:String(e.data);
         if(line==='uciok'){w.postMessage('isready');}
         if(line==='readyok'){sfReadyRef.current=true;}
-        if(line.startsWith('info')&&line.includes('score')){
-          const cp=line.match(/score cp (-?\d+)/);
-          const mt=line.match(/score mate (-?\d+)/);
-          if(cp)sfEvalRef.current=parseInt(cp[1]);
-          else if(mt)sfEvalRef.current=parseInt(mt[1])>0?99999:-99999;
+        if(line.startsWith('info')){
+          if(line.includes('score')){
+            const cp=line.match(/score cp (-?\d+)/);
+            const mt=line.match(/score mate (-?\d+)/);
+            let raw=null;
+            if(cp)raw=parseInt(cp[1]);
+            else if(mt)raw=parseInt(mt[1])>0?99999:-99999;
+            if(raw!==null){
+              sfEvalRef.current=raw;
+              if(sfLiveEvalRef.current){
+                setEvalScore(sfAiSideRef.current==='w'?raw:-raw);
+              }
+            }
+          }
+          if(line.includes(' pv '))sfPVRef.current=line;
         }
         if(line.startsWith('bestmove')&&sfCallbackRef.current){
           const bm=line.split(' ')[1];
-          sfCallbackRef.current(bm,sfEvalRef.current);
+          const pvSnap=sfPVRef.current;
+          sfPVRef.current='';
+          sfCallbackRef.current(bm,sfEvalRef.current,pvSnap);
           sfCallbackRef.current=null;
         }
       };
@@ -430,6 +463,7 @@ export default function ChessEngine(){
     setPromo(null);setPc(p);setEvalScore(null);setSearchInfo('');
     setHistStates([{board:initB,turn:'w',ep:null,cas:'KQkq',last:null,capW:[],capB:[]}]);
     setViewIdx(null);setHintMove(null);setHintThinking(false);
+    setPvExploreIdx(null);setPvExploreStates(null);
     analysisAbortRef.current=true;
     setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);setAnalyzing(false);
     setAnalysisProgress({current:0,total:0});setReviewMode(false);
@@ -468,7 +502,10 @@ export default function ChessEngine(){
       const runEngine=()=>{
         if(cancelled)return;
         sfEvalRef.current=null;
+        sfLiveEvalRef.current=true;
+        sfAiSideRef.current=aiC;
         sfCallbackRef.current=(uciMove,sfEval)=>{
+          sfLiveEvalRef.current=false;
           if(cancelled)return;
           if(uciMove&&uciMove!=='(none)'){
             const m=uciToMove(uciMove,b,aiC,e);
@@ -512,6 +549,7 @@ export default function ChessEngine(){
 
       return()=>{
         cancelled=true;
+        sfLiveEvalRef.current=false;
         sfCallbackRef.current=null;
         if(sfWorkerRef.current)sfWorkerRef.current.postMessage('stop');
       };
@@ -529,8 +567,26 @@ export default function ChessEngine(){
     return()=>clearTimeout(tid);
   },[turn,applyMv,gameKey]);
 
+  const enterPVExplore=useCallback((originBoard,originTurn,originEp,originCas,originLast,pvMoves)=>{
+    const states=[{board:originBoard,turn:originTurn,last:originLast}];
+    let curBd=originBoard,curTurn=originTurn,curEp=originEp,curCas=originCas;
+    for(const mv of pvMoves){
+      const nb=doMv(curBd,mv);
+      const nc=updCas(curCas,mv,curBd);
+      const ne=nextEp(mv);
+      states.push({board:nb,turn:curTurn==='w'?'b':'w',last:{f:mv.f,t:mv.t}});
+      curBd=nb;curTurn=curTurn==='w'?'b':'w';curEp=ne;curCas=nc;
+    }
+    setPvExploreStates(states);
+    setPvExploreIdx(1);
+  },[]);
+
+  const exitPVExplore=useCallback(()=>{
+    setPvExploreIdx(null);setPvExploreStates(null);
+  },[]);
+
   const click=useCallback((idx)=>{
-    if(viewIdx!==null||turn!==pc||over||thinking)return;
+    if(viewIdx!==null||pvExploreIdx!==null||turn!==pc||over||thinking)return;
     const myP=pc==='w'?isW:isB;
     const myPawn=pc==='w'?WP:BP;
     const pRow=pc==='w'?0:7;
@@ -552,17 +608,20 @@ export default function ChessEngine(){
     setHintThinking(true);
     const b=board,e=ep,c=cas,t=turn;
     if(sfReadyRef.current&&sfWorkerRef.current){
-      sfCallbackRef.current=(uciMove)=>{
+      sfCallbackRef.current=(uciMove,_sfEval,pvLine)=>{
         if(uciMove&&uciMove!=='(none)'){
           const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
           const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
-          setHintMove({f:fr*8+fc,t:tr*8+tc});
+          const pv=pvLine?parsePV(pvLine,b,t,e):[];
+          setHintMove({f:fr*8+fc,t:tr*8+tc,pv});
         }
         setHintThinking(false);
       };
+      sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
+      sfWorkerRef.current.postMessage('setoption name UCI_Elo value 3200');
       sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
       sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
-      sfWorkerRef.current.postMessage(`go depth 18 movetime 2000`);
+      sfWorkerRef.current.postMessage('go movetime 3000');
     }else{
       const result=findBestMove(b,e,c,t,3,600,0);
       if(result&&result.move)setHintMove({f:result.move.f,t:result.move.t});
@@ -601,6 +660,7 @@ export default function ChessEngine(){
     const bookHits=new Array(Math.max(0,total-1)).fill(false);
     let idx=0;
     // Clean Stockfish state before starting
+    sfLiveEvalRef.current=false; // 분석 중 실시간 eval 업데이트 차단
     if(sfReadyRef.current&&sfWorkerRef.current){
       sfWorkerRef.current.postMessage('stop');
       sfWorkerRef.current.postMessage('ucinewgame');
@@ -647,13 +707,16 @@ export default function ChessEngine(){
         if(sfReadyRef.current&&sfWorkerRef.current){
           sfEvalRef.current=null;
           let watchdog=null;
-          const doNext=(uciMove,sfEval)=>{
+          const doNext=(uciMove,sfEval,pvLine)=>{
             if(watchdog){clearTimeout(watchdog);watchdog=null;}
             if(analysisAbortRef.current){setAnalyzing(false);return;}
             if(uciMove&&uciMove!=='(none)'&&uciMove.length>=4){
               const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
               const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
-              if(fc>=0&&fr>=0&&fr<8&&tc>=0&&tr>=0&&tr<8)bestMovesArr[idx]={f:fr*8+fc,t:tr*8+tc};
+              if(fc>=0&&fr>=0&&fr<8&&tc>=0&&tr>=0&&tr<8){
+                const pv=pvLine?parsePV(pvLine,s.board,s.turn,s.ep):[];
+                bestMovesArr[idx]={f:fr*8+fc,t:tr*8+tc,pv};
+              }
             }
             evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
             idx++;
@@ -765,10 +828,11 @@ export default function ChessEngine(){
   const goFwd=()=>{const next=effectiveIdx+1;if(next>=histStates.length-1)setViewIdx(null);else setViewIdx(next);};
   const activeHistIdx=effectiveIdx-1;
 
-  // Display state (historical view or live)
+  // Display state (PV explore > historical view > live)
+  const pvState=pvExploreIdx!==null&&pvExploreStates?pvExploreStates[pvExploreIdx]:null;
   const viewState=viewIdx!==null?histStates[viewIdx]:null;
-  const displayBoard=viewState?viewState.board:board;
-  const displayLast=viewState?viewState.last:last;
+  const displayBoard=pvState?pvState.board:(viewState?viewState.board:board);
+  const displayLast=pvState?pvState.last:(viewState?viewState.last:last);
   const displayCapW=viewState?viewState.capW:capW;
   const displayCapB=viewState?viewState.capB:capB;
   const displayMatAdv=(()=>{let wL=0,bL=0;displayCapW.forEach(p=>wL+=mv(p));displayCapB.forEach(p=>bL+=mv(p));return bL-wL})();
@@ -957,7 +1021,8 @@ export default function ChessEngine(){
           <div style={{padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',background:'linear-gradient(to bottom, rgba(255,255,255,0.03), transparent)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
             <span style={{fontSize:20,filter:'drop-shadow(0 0 5px rgba(240,192,64,0.5))'}}>📊</span>
             <span style={{fontSize:17,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace",letterSpacing:1}}>분석 리포트</span>
-            {viewIdx!==null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)'}}>REVIEW MODE</span>}
+            {viewIdx!==null&&pvExploreIdx===null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)'}}>REVIEW MODE</span>}
+            {pvExploreIdx!==null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#3cdc82',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(60,220,130,0.4)'}}>PV 탐색</span>}
           </div>
 
           {/* ── Controls section (always visible) ── */}
@@ -989,7 +1054,25 @@ export default function ChessEngine(){
                   <span style={{fontSize:13,color:'#e8e0d5',marginLeft:6,fontWeight:600}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
                   {mc.grade!=='best'&&bestMoves[viewIdx-1]&&(()=>{
                     const bm=bestMoves[viewIdx-1];
-                    return <div style={{width:'100%',marginTop:6,fontSize:12,color:'#89d4f0',fontFamily:"'Space Mono',monospace",fontWeight:700,paddingLeft:30,textShadow:'0 0 5px rgba(137,212,240,0.3)'}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]} → {FL[bm.t&7]}{RL[bm.t>>3]}</div>;
+                    return(<>
+                      <div style={{width:'100%',marginTop:6,fontSize:12,color:'#89d4f0',fontFamily:"'Space Mono',monospace",fontWeight:700,paddingLeft:30,textShadow:'0 0 5px rgba(137,212,240,0.3)'}}>최선: {FL[bm.f&7]}{RL[bm.f>>3]} → {FL[bm.t&7]}{RL[bm.t>>3]}</div>
+                      {bm.pv&&bm.pv.length>1&&pvExploreIdx===null&&(
+                        <div style={{width:'100%',marginTop:4,fontSize:11,color:'#666',fontFamily:"'Space Mono',monospace",paddingLeft:30,lineHeight:1.6}}>
+                          <span style={{color:'#555',marginRight:4}}>계속수</span>
+                          {bm.pv.slice(1).map((mv,i)=>(
+                            <span key={i} style={{color:i%2===0?'#89d4f088':'#e8d5b566',marginRight:5}}>{FL[mv.f&7]}{RL[mv.f>>3]}→{FL[mv.t&7]}{RL[mv.t>>3]}</span>
+                          ))}
+                        </div>
+                      )}
+                      {bm.pv&&bm.pv.length>0&&pvExploreIdx===null&&(
+                        <button onClick={()=>{
+                          const origin=histStates[viewIdx-1];
+                          enterPVExplore(origin.board,origin.turn,origin.ep,origin.cas,origin.last,bm.pv);
+                        }} style={{width:'100%',marginTop:6,padding:'6px 10px',background:'rgba(137,212,240,0.12)',color:'#89d4f0',border:'1px solid rgba(137,212,240,0.35)',borderRadius:7,fontSize:12,cursor:'pointer',fontWeight:700,fontFamily:"'Space Mono',monospace",textAlign:'left'}}>
+                          🔍 최선수부터 탐색 ({bm.pv.length}수)
+                        </button>
+                      )}
+                    </>);
                   })()}
                 </div>
               );
@@ -997,14 +1080,14 @@ export default function ChessEngine(){
 
             {/* Navigation */}
             <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-              <button onClick={()=>setViewIdx(0)} disabled={!canBack}
-                style={{padding:'8px 12px',background:canBack?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canBack?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:canBack?'pointer':'default',transition:'all 0.2s',boxShadow:canBack?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏮</button>
-              <button onClick={goBack} disabled={!canBack}
-                style={{padding:'8px 16px',background:canBack?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canBack?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:canBack?'pointer':'default',transition:'all 0.2s',boxShadow:canBack?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>‹</button>
-              <button onClick={goFwd} disabled={!canFwd}
-                style={{padding:'8px 16px',background:canFwd?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canFwd?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:canFwd?'pointer':'default',transition:'all 0.2s',boxShadow:canFwd?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>›</button>
-              <button onClick={()=>setViewIdx(null)} disabled={isLive}
-                style={{padding:'8px 12px',background:!isLive?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:!isLive?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:!isLive?'pointer':'default',transition:'all 0.2s',boxShadow:!isLive?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏭</button>
+              <button onClick={()=>setViewIdx(0)} disabled={!canBack||pvExploreIdx!==null}
+                style={{padding:'8px 12px',background:(canBack&&pvExploreIdx===null)?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:(canBack&&pvExploreIdx===null)?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:(canBack&&pvExploreIdx===null)?'pointer':'default',transition:'all 0.2s',boxShadow:(canBack&&pvExploreIdx===null)?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏮</button>
+              <button onClick={goBack} disabled={!canBack||pvExploreIdx!==null}
+                style={{padding:'8px 16px',background:(canBack&&pvExploreIdx===null)?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:(canBack&&pvExploreIdx===null)?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:(canBack&&pvExploreIdx===null)?'pointer':'default',transition:'all 0.2s',boxShadow:(canBack&&pvExploreIdx===null)?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>‹</button>
+              <button onClick={goFwd} disabled={!canFwd||pvExploreIdx!==null}
+                style={{padding:'8px 16px',background:(canFwd&&pvExploreIdx===null)?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:(canFwd&&pvExploreIdx===null)?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:20,cursor:(canFwd&&pvExploreIdx===null)?'pointer':'default',transition:'all 0.2s',boxShadow:(canFwd&&pvExploreIdx===null)?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>›</button>
+              <button onClick={()=>setViewIdx(null)} disabled={isLive||pvExploreIdx!==null}
+                style={{padding:'8px 12px',background:(!isLive&&pvExploreIdx===null)?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:(!isLive&&pvExploreIdx===null)?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:16,cursor:(!isLive&&pvExploreIdx===null)?'pointer':'default',transition:'all 0.2s',boxShadow:(!isLive&&pvExploreIdx===null)?'0 2px 5px rgba(0,0,0,0.3)':'none'}}>⏭</button>
               
               <div style={{width:1,height:24,background:'rgba(255,255,255,0.1)',margin:'0 4px'}}/>
               
@@ -1027,6 +1110,35 @@ export default function ChessEngine(){
               );})()}
             </div>
             {searchInfo&&<div style={{fontSize:11,color:'#666',marginTop:8,fontFamily:"'Space Mono',monospace",textAlign:'right'}}>{searchInfo}</div>}
+            {pvExploreIdx!==null&&pvExploreStates&&(
+              <div style={{display:'flex',alignItems:'center',gap:6,padding:'6px 0',flexWrap:'wrap'}}>
+                <button onClick={()=>setPvExploreIdx(i=>Math.max(0,i-1))} disabled={pvExploreIdx<=0}
+                  style={{padding:'5px 10px',background:'rgba(255,255,255,0.07)',color:pvExploreIdx<=0?'#444':'#e8e0d5',border:'1px solid rgba(255,255,255,0.15)',borderRadius:6,fontSize:16,cursor:pvExploreIdx<=0?'default':'pointer',fontWeight:700}}>‹</button>
+                <span style={{fontSize:12,color:'#8a8580',fontFamily:"'Space Mono',monospace",fontWeight:700,minWidth:50,textAlign:'center'}}>{pvExploreIdx}/{pvExploreStates.length-1}수</span>
+                <button onClick={()=>setPvExploreIdx(i=>Math.min(pvExploreStates.length-1,i+1))} disabled={pvExploreIdx>=pvExploreStates.length-1}
+                  style={{padding:'5px 10px',background:'rgba(255,255,255,0.07)',color:pvExploreIdx>=pvExploreStates.length-1?'#444':'#e8e0d5',border:'1px solid rgba(255,255,255,0.15)',borderRadius:6,fontSize:16,cursor:pvExploreIdx>=pvExploreStates.length-1?'default':'pointer',fontWeight:700}}>›</button>
+                <button onClick={exitPVExplore}
+                  style={{marginLeft:'auto',padding:'5px 10px',background:'rgba(224,80,80,0.1)',color:'#e05050',border:'1px solid rgba(224,80,80,0.35)',borderRadius:6,fontSize:12,cursor:'pointer',fontWeight:700}}>✕ 종료</button>
+              </div>
+            )}
+            {hintMove&&(
+              <div style={{marginTop:8}}>
+                {pvExploreIdx===null&&hintMove.pv?.length>0&&(
+                  <button onClick={()=>enterPVExplore(board,turn,ep,cas,last,hintMove.pv)}
+                    style={{width:'100%',padding:'7px 12px',background:'rgba(60,220,130,0.12)',color:'#3cdc82',border:'1px solid rgba(60,220,130,0.35)',borderRadius:8,fontSize:12,cursor:'pointer',fontWeight:700,fontFamily:"'Space Mono',monospace",textAlign:'left'}}>
+                    🔍 계속수 탐색 ({hintMove.pv.length}수)
+                  </button>
+                )}
+                {pvExploreIdx===null&&hintMove.pv?.length>1&&(
+                  <div style={{marginTop:6,padding:'8px 12px',background:'rgba(60,220,130,0.06)',border:'1px solid rgba(60,220,130,0.2)',borderRadius:8,fontSize:11,fontFamily:"'Space Mono',monospace"}}>
+                    <span style={{color:'#3cdc82',marginRight:6,fontWeight:700}}>계속수</span>
+                    {hintMove.pv.slice(1).map((mv,i)=>(
+                      <span key={i} style={{color:i%2===0?'#89d4f088':'#e8d5b566',marginRight:5}}>{FL[mv.f&7]}{RL[mv.f>>3]}→{FL[mv.t&7]}{RL[mv.t>>3]}</span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
           </div>
 
           {/* Scrollable content */}
