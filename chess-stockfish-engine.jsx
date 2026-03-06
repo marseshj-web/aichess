@@ -316,16 +316,21 @@ function parsePV(pvLine,bd,col,ep){
   return moves;
 }
 
-// Lichess Opening Explorer: returns best UCI move for a FEN position, or null on failure
-async function getOpeningMove(fen){
+// Lichess Opening Explorer: returns opening info and moves for a FEN position, or null on failure
+async function getOpeningData(fen){
   try{
     const res=await fetch(`https://explorer.lichess.ovh/masters?fen=${encodeURIComponent(fen)}&moves=5&topGames=0`,{signal:AbortSignal.timeout(2000)});
     if(!res.ok)return null;
     const data=await res.json();
-    if(data.moves&&data.moves.length>0){
-      return data.moves.map(m=>m.uci);
-    }
+    return data;
   }catch(e){}
+  return null;
+}
+
+// Helper to keep old behavior for AI/analysis
+async function getOpeningMove(fen){
+  const data=await getOpeningData(fen);
+  if(data&&data.moves&&data.moves.length>0)return data.moves.map(m=>m.uci);
   return null;
 }
 
@@ -355,8 +360,28 @@ function calcAccuracy(moves){
 }
 
 // ═══════════════════════════════════════════════════
+// SOUNDS
+// ═══════════════════════════════════════════════════
+const SOUNDS = typeof Audio !== 'undefined' ? {
+  move: new Audio('/sounds/move.mp3'),
+  capture: new Audio('/sounds/capture.mp3'),
+  check: new Audio('/sounds/check.mp3'),
+  castle: new Audio('/sounds/castle.mp3'),
+  gameEnd: new Audio('/sounds/gameEnd.mp3')
+} : {};
+
+const playSound = (type) => {
+  if (SOUNDS[type]) {
+    const s = SOUNDS[type].cloneNode();
+    s.play().catch(e => console.log('Audio playback prevented:', e));
+  }
+};
+
+// ═══════════════════════════════════════════════════
 // REACT COMPONENT
 // ═══════════════════════════════════════════════════
+let localOpeningsDB = null;
+
 export default function ChessEngine(){
   const[board,setBoard]=useState(initBoard);
   const[turn,setTurn]=useState('w');
@@ -389,6 +414,8 @@ export default function ChessEngine(){
   const[reviewMode,setReviewMode]=useState(false);
   const[pvExploreStates,setPvExploreStates]=useState(null);
   const[pvExploreIdx,setPvExploreIdx]=useState(null);
+  const[soundOn,setSoundOn]=useState(true);
+  const[openingInfo,setOpeningInfo]=useState(null);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -402,6 +429,7 @@ export default function ChessEngine(){
   const capBR=useRef(capB);capBR.current=capB;
   const histR=useRef(hist);histR.current=hist;
   const analysisAbortRef=useRef(false);
+  const soundOnRef=useRef(soundOn);soundOnRef.current=soundOn;
 
   // Stockfish worker refs (engine state, not React state)
   const sfWorkerRef=useRef(null);
@@ -483,6 +511,7 @@ export default function ChessEngine(){
     analysisAbortRef.current=true;
     setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);setAnalyzing(false);
     setAnalysisProgress({current:0,total:0});setReviewMode(false);
+    setOpeningInfo(null);
     setGameKey(k=>k+1);
   },[]);
 
@@ -497,8 +526,83 @@ export default function ChessEngine(){
     setHistStates(p=>[...p,{board:nb,turn:nx,ep:ne,cas:nc,last:{f:m.f,t:m.t},capW:newCapW,capB:newCapB}]);
     setViewIdx(null);setHintMove(null);
     setTurn(nx);
-    if(!legal(nb,nx,ne,nc).length){if(inChk(nb,nx))setOver(col==='w'?'White wins!':'Black wins!');else setOver('Stalemate')}
+    
+    let isEnd=false;
+    const isChk=inChk(nb,nx);
+    if(!legal(nb,nx,ne,nc).length){
+      if(isChk)setOver(col==='w'?'White wins!':'Black wins!');
+      else setOver('Stalemate');
+      isEnd=true;
+    }
+    
+    if(soundOnRef.current){
+      if(isEnd)playSound('gameEnd');
+      else if(isChk)playSound('check');
+      else if(m.cas)playSound('castle');
+      else if(cap||m.ep)playSound('capture');
+      else playSound('move');
+    }
   },[]);
+
+  // Fetch opening info for current position
+  useEffect(()=>{
+    const idx = viewIdx !== null ? viewIdx : histStates.length - 1;
+    if(idx > 30) {
+      setOpeningInfo(null);
+      return;
+    }
+    const s = histStates[idx];
+    if(!s) return;
+    const fen = boardToFEN(s.board, s.turn, s.ep, s.cas);
+    // The downloaded opening DB omits en-passant squares usually, so we search without it (set to '-')
+    const fenNoEp = boardToFEN(s.board, s.turn, null, s.cas);
+    const shortFen = fenNoEp.split(' ').slice(0, 4).join(' '); // board turn cas -
+
+    // 1. Load local DB if not loaded
+    const checkLocalAndFetch = async () => {
+      if (!localOpeningsDB) {
+        try {
+          const res = await fetch('/openings.json');
+          if (res.ok) {
+            localOpeningsDB = await res.json();
+          }
+        } catch(e) { console.warn('Failed to load local openings', e); }
+      }
+
+      // 2. Check local DB first for instant response
+      let localMatch = null;
+      if (localOpeningsDB && localOpeningsDB[shortFen]) {
+        localMatch = localOpeningsDB[shortFen];
+        // Instantly show local name
+        setOpeningInfo(prev => ({ ...prev, opening: localMatch, outOfBook: false }));
+      } else {
+        // If not in local DB, it might be out of book, but we wait for Lichess to confirm
+        setOpeningInfo(prev => prev ? { ...prev, outOfBook: false } : { outOfBook: false });
+      }
+
+      // 3. Fetch Lichess API for move statistics (silently in background)
+      let active = true;
+      getOpeningData(fen).then(data => {
+        if(!active) return;
+        if(data && (data.opening || (data.moves && data.moves.length > 0))) {
+          setOpeningInfo({
+            opening: localMatch || data.opening, // Prefer local name if available
+            moves: data.moves,
+            outOfBook: false
+          });
+        } else {
+          // Only mark out of book if both local and Lichess fail
+          if (!localMatch) {
+            setOpeningInfo({ outOfBook: true });
+          }
+        }
+      });
+      return () => { active = false; };
+    };
+
+    const cleanup = checkLocalAndFetch();
+    return () => { cleanup.then(c => c && c()); };
+  },[viewIdx, histStates]);
 
   // AI turn – Stockfish preferred; built-in alpha-beta as fallback
   useEffect(()=>{
@@ -680,6 +784,102 @@ export default function ChessEngine(){
     setThinking(false);
     setOver(pc==='w'?'Black wins!':'White wins!');
   },[over,thinking,pc]);
+
+  const handleExportPGN=useCallback(()=>{
+    if(histStates.length<2)return;
+    const moves=[];
+    for(let i=1;i<histStates.length;i++){
+      const m=histStates[i].last;
+      let uci=FL[m.f&7]+RL[m.f>>3]+FL[m.t&7]+RL[m.t>>3];
+      if(histStates[i].board[m.t]===WQ&&m.t<8&&m.f>=8)uci+='q'; // basic promo handling
+      else if(histStates[i].board[m.t]===BQ&&m.t>=56&&m.f<56)uci+='q';
+      moves.push(uci);
+    }
+    const pgn=moves.reduce((acc,curr,idx)=>{
+      if(idx%2===0)return acc+`${Math.floor(idx/2)+1}. ${curr} `;
+      return acc+`${curr} `;
+    },'').trim();
+    
+    navigator.clipboard.writeText(pgn).then(()=>{
+      alert('PGN(UCI 형식)이 클립보드에 복사되었습니다.');
+    }).catch(e=>console.error('PGN export failed:',e));
+  },[histStates]);
+
+  const handleImportPGN=useCallback(()=>{
+    if(thinking)return;
+    const input=prompt('PGN(UCI 형식, 예: 1. e2e4 e7e5) 텍스트를 입력하세요:');
+    if(!input)return;
+    
+    // Clean string and extract UCI moves
+    const clean=input.replace(/\d+\./g,'').replace(/\s+/g,' ').trim();
+    const tokens=clean.split(' ').filter(t=>t.length>=4&&t.length<=5);
+    
+    if(tokens.length===0){
+      alert('유효한 기보를 찾을 수 없습니다.');
+      return;
+    }
+
+    // Reset board first
+    reset();
+    
+    // We need to apply moves sequentially. 
+    // Since we are not using full Stockfish for import to avoid complexity in this step,
+    // we'll apply them using our internal engine logic sequentially with a small delay.
+    let currentBoard=initBoard();
+    let currentTurn='w';
+    let currentEp=null;
+    let currentCas='KQkq';
+    let validMoves=0;
+    
+    const applyNext=(idx)=>{
+      if(idx>=tokens.length){
+        setGameKey(k=>k+1); // Force full re-render
+        return;
+      }
+      
+      const uci=tokens[idx];
+      const m=uciToMove(uci,currentBoard,currentTurn,currentEp);
+      
+      // Safety check: is it a pseudo-legal move structure?
+      if(!m||m.f<0||m.t<0||m.f>63||m.t>63){
+        console.warn('Invalid move in sequence:',uci);
+        return;
+      }
+
+      const cap=currentBoard[m.t];
+      const nb=doMv(currentBoard,m);
+      const nc=updCas(currentCas,m,currentBoard);
+      const ne=nextEp(m);
+      const nx=currentTurn==='w'?'b':'w';
+      
+      currentBoard=nb;
+      currentTurn=nx;
+      currentEp=ne;
+      currentCas=nc;
+      validMoves++;
+
+      setBoard(currentBoard);setCas(currentCas);setEp(currentEp);setLast({f:m.f,t:m.t});
+      setTurn(currentTurn);
+      setHist(p=>[...p,`${SYM[currentBoard[m.f]]||''}${FL[m.f&7]}${RL[m.f>>3]}→${FL[m.t&7]}${RL[m.t>>3]}`]);
+      
+      // Update history state
+      setHistStates(p=>{
+        const prevCapW=p.length>0?p[p.length-1].capW:[];
+        const prevCapB=p.length>0?p[p.length-1].capB:[];
+        const newCapW=[...prevCapW,...(cap&&isW(cap)?[cap]:[]),...(m.ep&&nx==='w'?[WP]:[])];
+        const newCapB=[...prevCapB,...(cap&&isB(cap)?[cap]:[]),...(m.ep&&nx==='b'?[BP]:[])];
+        setCapW(newCapW);setCapB(newCapB);
+        return [...p,{board:currentBoard,turn:currentTurn,ep:currentEp,cas:currentCas,last:{f:m.f,t:m.t},capW:newCapW,capB:newCapB}];
+      });
+
+      // Continue to next move rapidly
+      setTimeout(()=>applyNext(idx+1),20);
+    };
+    
+    // Start sequence
+    setTimeout(()=>applyNext(0),100);
+    
+  },[thinking,reset]);
 
   const runAnalysis=useCallback(()=>{
     if(analyzing||histStates.length<2)return;
@@ -890,14 +1090,14 @@ export default function ChessEngine(){
       const isKC=isLive&&chk&&((turn==='w'&&piece===WK)||(turn==='b'&&piece===BK));
       let bg=lt?'#e8d5b5':'#b58863';
       if(isLst)bg=lt?'#f6f680':'#baca44';if(isSel)bg='#7fc97f';if(isKC)bg='#e74c3c';
-      sq.push(<div key={idx} onClick={()=>click(idx)}
+      sq.push(<div key={idx} onClick={()=>click(idx)} className="board-square"
         style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
-        {!!piece&&<span style={{fontSize:'min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px)',lineHeight:1,zIndex:1,
-          color:isW(piece)?'#f5f0e8':'#1a1a1a',
-          WebkitTextStroke:isW(piece)?'0.8px #4a3520':'0.5px #000',
-          filter:isW(piece)?'drop-shadow(1px 1px 2px rgba(0,0,0,0.5))':'drop-shadow(1px 1px 1px rgba(0,0,0,0.3))'
+        {!!piece&&<span className="chess-piece" style={{lineHeight:1,zIndex:1,
+          color:isW(piece)?'#ffffff':'#111111',
+          WebkitTextStroke:isW(piece)?'1px #222':'1px #eee',
+          textShadow:isW(piece)?'0 2px 4px rgba(0,0,0,0.5)':'0 2px 4px rgba(0,0,0,0.5)'
         }}>{SYM[piece]}</span>}
         {ci===0&&<span style={{position:'absolute',top:2,left:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{RL[flip?7-ri:ri]}</span>}
         {ri===7&&<span style={{position:'absolute',bottom:1,right:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{FL[flip?7-ci:ci]}</span>}
@@ -914,24 +1114,34 @@ export default function ChessEngine(){
   const d=DIFFS.reduce((prev,curr)=>Math.abs(curr.elo-elo)<Math.abs(prev.elo-elo)?curr:prev);
 
   return(
-    <div style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",overflow:'hidden',color:'#e8e0d5'}}>
+    <div className="app-container" style={{height:'100vh',background:'#262421',display:'flex',flexDirection:'column',fontFamily:"'DM Sans',sans-serif",color:'#e8e0d5'}}>
       <link href="https://fonts.googleapis.com/css2?family=DM+Sans:wght@400;500;700&family=Space+Mono:wght@700&display=swap" rel="stylesheet"/>
 
       {/* ── Top bar ── */}
-      <div style={{height:52,background:'#1a1816',borderBottom:'1px solid rgba(255,255,255,0.1)',display:'flex',alignItems:'center',padding:'0 20px',gap:10,flexShrink:0}}>
-        <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',fontSize:17,marginRight:2}}>♚ Chess Arena</span>
-        <span style={{fontSize:11,color:'#e8a040',marginRight:10}}>Enhanced Engine</span>
-        <button onClick={swap}
-          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-          {pc==='w'?'♔ White':'♚ Black'} ⇄
-        </button>
-        <button onClick={()=>reset()}
-          style={{padding:'7px 16px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif"}}>
-          ↺ New Game
-        </button>
-        <div style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
-          <span style={{fontSize:12,color:'#666'}}>난이도</span>
-          <input type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
+      <div className="top-bar">
+        <div className="top-title">
+          <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700,color:'#e8d5b5',fontSize:17}}>♚ Chess Arena</span>
+          <span className="hide-on-mobile" style={{fontSize:11,color:'#e8a040'}}>Enhanced Engine</span>
+        </div>
+        
+        <div className="top-buttons">
+          <button onClick={swap}
+            style={{padding:'7px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap'}}>
+            {pc==='w'?'♔ White':'♚ Black'} <span className="hide-on-mobile">⇄</span>
+          </button>
+          <button onClick={()=>reset()}
+            style={{padding:'7px 12px',background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap'}}>
+            <span className="hide-on-mobile">↺ </span>New<span className="hide-on-mobile"> Game</span>
+          </button>
+          <button onClick={()=>setSoundOn(!soundOn)}
+            style={{padding:'7px 12px',background:soundOn?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:soundOn?'#3cdc82':'#888',border:`1px solid ${soundOn?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}>
+            {soundOn?'🔊':'🔇'}
+          </button>
+        </div>
+        
+        <div className="elo-controls" style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
+          <span className="hide-on-mobile" style={{fontSize:12,color:'#666'}}>난이도</span>
+          <input className="hide-on-mobile" type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
             style={{width:130,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
           <input
             type="number"
@@ -958,19 +1168,19 @@ export default function ChessEngine(){
             onBlur={()=>setEloInput('')}
             style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:d.color,border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
           />
-          <span style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
+          <span className="hide-on-mobile" style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
           <span style={{fontSize:11,color:'#555'}}>d{d.depth}</span>
         </div>
       </div>
 
       {/* ── Main layout ── */}
-      <div style={{flex:1,display:'flex',overflow:'hidden',minHeight:0}}>
+      <div className="main-layout" style={{flex:1,display:'flex',minHeight:0}}>
 
         {/* ── Board section ── */}
-        <div style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px',minWidth:0}}>
+        <div className="board-section" style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px'}}>
 
           {/* Opponent row */}
-          <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div className="player-row top" style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
               <div>
@@ -982,15 +1192,15 @@ export default function ChessEngine(){
           </div>
 
           {/* Eval bar + Board */}
-          <div style={{display:'flex',alignItems:'stretch'}}>
+          <div style={{display:'flex',alignItems:'stretch',width:'100%',justifyContent:'center'}}>
             {/* Eval bar */}
-            <div style={{width:42,height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
+            <div className="eval-bar" style={{width:42,borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
               <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#1a1816':'#e8e0d0',transition:'height 0.6s ease'}}/>
               <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:12,fontWeight:700,color:'#e8e0d5',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace",textShadow:'0 0 6px #000,0 0 12px #000'}}>{evalText}</div>
             </div>
 
             {/* Board */}
-            <div style={{width:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',height:'min(calc(100vh - 184px), calc(100vw - 480px), 700px)',display:'flex',flexWrap:'wrap',borderRadius:'0 5px 5px 0',overflow:'hidden',boxShadow:'0 10px 50px rgba(0,0,0,0.7)',position:'relative'}}>
+            <div className="chess-board" style={{display:'flex',flexWrap:'wrap',borderRadius:'0 5px 5px 0',overflow:'hidden',boxShadow:'0 10px 50px rgba(0,0,0,0.7)',position:'relative'}}>
               {renderBoard()}
 
               {hintMove&&(()=>{
@@ -1053,8 +1263,12 @@ export default function ChessEngine(){
           <div style={{padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',background:'linear-gradient(to bottom, rgba(255,255,255,0.03), transparent)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
             <span style={{fontSize:20,filter:'drop-shadow(0 0 5px rgba(240,192,64,0.5))'}}>📊</span>
             <span style={{fontSize:17,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace",letterSpacing:1}}>분석 리포트</span>
-            {viewIdx!==null&&pvExploreIdx===null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)'}}>REVIEW MODE</span>}
-            {pvExploreIdx!==null&&<span style={{marginLeft:'auto',fontSize:10,fontWeight:800,color:'#111',background:'#3cdc82',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(60,220,130,0.4)'}}>PV 탐색</span>}
+            <div style={{marginLeft:'auto',display:'flex',gap:6,alignItems:'center'}}>
+              {!thinking&&<button onClick={handleImportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'4px 6px',borderRadius:4,cursor:'pointer',fontWeight:700,transition:'all 0.2s'}}>📥 불러오기</button>}
+              {histStates.length>1&&<button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'4px 6px',borderRadius:4,cursor:'pointer',fontWeight:700,transition:'all 0.2s'}}>📋 내보내기</button>}
+              {viewIdx!==null&&pvExploreIdx===null&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)',marginLeft:4}}>REVIEW</span>}
+              {pvExploreIdx!==null&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#3cdc82',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(60,220,130,0.4)',marginLeft:4}}>PV 탐색</span>}
+            </div>
           </div>
 
           {/* ── Controls section (always visible) ── */}
@@ -1080,7 +1294,7 @@ export default function ChessEngine(){
               const mc=moveClassifications[viewIdx-1];
               const gi=GRADE_INFO[mc.grade];
               return(
-                <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:gi.color+'22',border:`1.5px solid ${gi.color}88`,borderRadius:10,marginBottom:12,flexWrap:'wrap',boxShadow:`0 4px 20px ${gi.color}15, inset 0 0 10px ${gi.color}10`}}>
+                <div style={{display:'flex',alignItems:'center',gap:10,padding:'10px 16px',background:gi.color+'22',border:`1.5px solid ${gi.color}88`,borderRadius:10,marginBottom:12,flexWrap:'wrap',boxShadow:`0 4px 20px ${gi.color}15, inset 0 0 10px ${gi.color}10`, minHeight: '74px', boxSizing: 'border-box', alignContent: 'flex-start'}}>
                   <span style={{fontSize:20,filter:`drop-shadow(0 0 4px ${gi.color}88)`}}>{gi.sym}</span>
                   <span style={{fontSize:16,fontWeight:800,color:gi.color,fontFamily:"'Space Mono',monospace",textShadow:`0 0 8px ${gi.color}44`}}>{gi.label}</span>
                   <span style={{fontSize:13,color:'#e8e0d5',marginLeft:6,fontWeight:600}}>{mc.player==='w'?'백':'흑'} · -{(mc.cpLoss/100).toFixed(1)}점</span>
@@ -1219,6 +1433,83 @@ export default function ChessEngine(){
                     );
                   })}
                 </div>
+
+                {/* Coach Report */}
+                {(()=>{
+                  const myMoves = moveClassifications.map((m, i) => ({...m, idx: i})).filter(m => m.player === pc);
+                  if (!myMoves.length) return null;
+                  
+                  const acc = parseFloat(calcAccuracy(myMoves));
+                  const estimatedElo = Math.min(2800, Math.max(400, Math.round(acc * 35 - 900)));
+                  
+                  const opening = myMoves.filter(m => Math.floor(m.idx / 2) < 15);
+                  const middle = myMoves.filter(m => Math.floor(m.idx / 2) >= 15 && Math.floor(m.idx / 2) < 30);
+                  const end = myMoves.filter(m => Math.floor(m.idx / 2) >= 30);
+                  
+                  const getAvgCp = arr => arr.length ? arr.reduce((s, m) => s + m.cpLoss, 0) / arr.length : 0;
+                  const opCp = getAvgCp(opening);
+                  const midCp = getAvgCp(middle);
+                  const endCp = getAvgCp(end);
+                  
+                  const comments = [];
+                  if (opCp < 30 && opening.length > 5) comments.push("초반 오프닝이 매우 단단합니다.");
+                  else if (opCp > 80) comments.push("오프닝 전개 과정에서 손실이 컸습니다.");
+                  
+                  if (midCp < 40 && middle.length > 5) comments.push("중반부 전술적 대처가 뛰어납니다.");
+                  else if (midCp > 100) comments.push("중반 전술 싸움에서 집중력이 아쉽습니다.");
+                  
+                  if (endCp > 100 && end.length > 5) comments.push("엔드게임 마무리에 주의가 필요합니다.");
+                  
+                  const blunders = myMoves.filter(m => m.grade === 'blunder').length;
+                  if (blunders >= 2) comments.push("치명적인 블런더를 줄이는 연습이 필요합니다.");
+                  
+                  if (comments.length === 0) comments.push("전반적으로 무난한 대국이었습니다.");
+                  
+                  const criticalMoves = [...myMoves].sort((a, b) => b.cpLoss - a.cpLoss).slice(0, 2).filter(m => m.cpLoss > 150);
+                  
+                  return (
+                    <div style={{marginTop: 20, padding: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 10, border: '1px solid rgba(255,255,255,0.08)'}}>
+                      <div style={{display: 'flex', alignItems: 'center', gap: 8, marginBottom: 12}}>
+                        <span style={{fontSize: 20}}>🤖</span>
+                        <span style={{fontSize: 15, fontWeight: 700, color: '#e8d5b5'}}>코치 리포트</span>
+                      </div>
+                      
+                      <div style={{display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 14, background: 'rgba(0,0,0,0.3)', padding: '10px 14px', borderRadius: 8}}>
+                        <span style={{fontSize: 13, color: '#b0a898'}}>예상 퍼포먼스 ELO</span>
+                        <span style={{fontSize: 20, fontWeight: 700, color: '#f0c040', fontFamily: "'Space Mono',monospace"}}>{estimatedElo}</span>
+                      </div>
+                      
+                      <ul style={{margin: 0, paddingLeft: 20, color: '#e8e0d5', fontSize: 13, lineHeight: 1.6, marginBottom: criticalMoves.length ? 14 : 0}}>
+                        {comments.map((c, i) => <li key={i} style={{marginBottom: 4}}>{c}</li>)}
+                      </ul>
+                      
+                      {criticalMoves.length > 0 && (
+                        <div>
+                          <div style={{fontSize: 12, color: '#8a8580', marginBottom: 8}}>결정적 분기점 (치명적 실수)</div>
+                          <div style={{display: 'flex', flexDirection: 'column', gap: 6}}>
+                            {criticalMoves.map(m => {
+                              const turnNum = Math.floor(m.idx / 2) + 1;
+                              const isWhite = m.idx % 2 === 0;
+                              return (
+                                <div key={m.idx} onClick={() => setViewIdx(m.idx + 1)} style={{display: 'flex', alignItems: 'center', gap: 10, padding: '8px 12px', background: 'rgba(224,80,80,0.1)', border: '1px solid rgba(224,80,80,0.3)', borderRadius: 6, cursor: 'pointer', transition: 'all 0.2s'}}>
+                                  <span style={{fontSize: 13, color: '#e8e0d5', fontFamily: "'Space Mono',monospace", width: 40}}>
+                                    {turnNum}.{isWhite ? ' ' : '...'}
+                                  </span>
+                                  <span style={{fontSize: 13, color: '#e05050', fontWeight: 700}}>
+                                    {hist[m.idx]}
+                                  </span>
+                                  <span style={{fontSize: 12, color: '#b0a898', marginLeft: 'auto'}}>
+                                    -{(m.cpLoss / 100).toFixed(1)}점
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             ):(
               // Move history
@@ -1227,7 +1518,58 @@ export default function ChessEngine(){
                   <div style={{color:'#555',fontSize:14,textAlign:'center',paddingTop:24}}>게임을 시작하세요</div>
                 ):(
                   <>
-                    <div style={{fontSize:11,color:'#666',marginBottom:8,fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
+                    {/* Opening Explorer */}
+                    {openingInfo && (
+                      <div style={{marginBottom: 16, background: 'rgba(255,255,255,0.03)', borderRadius: 8, padding: 12, border: '1px solid rgba(255,255,255,0.08)'}}>
+                        <div style={{fontSize: 11, color: '#e8a040', fontWeight: 700, letterSpacing: 0.5, marginBottom: 4, display: 'flex', alignItems: 'center', gap: 4}}>
+                          <span style={{fontSize: 14}}>📖</span> Opening Explorer
+                        </div>
+                        {openingInfo.outOfBook ? (
+                          <div style={{fontSize: 13, color: '#b0a898', fontStyle: 'italic'}}>Out of Book (오프닝 북에서 벗어남)</div>
+                        ) : (
+                          <>
+                            {openingInfo.opening && (
+                              <div style={{fontSize: 14, fontWeight: 700, color: '#e8e0d5', marginBottom: 8, lineHeight: 1.3}}>
+                                <span style={{color: '#89d4f0', marginRight: 6}}>{openingInfo.opening.eco}</span>
+                                {openingInfo.opening.name}
+                              </div>
+                            )}
+                            {openingInfo.moves && openingInfo.moves.length > 0 && (
+                              <div style={{display: 'flex', flexDirection: 'column', gap: 4}}>
+                                <div style={{fontSize:10, color:'#666', marginBottom:2}}>마스터들의 추천 수 (승/무/패)</div>
+                                {openingInfo.moves.slice(0, 3).map((m, i) => {
+                                  const total = m.white + m.draws + m.black;
+                                  const wp = (m.white / total) * 100;
+                                  const dp = (m.draws / total) * 100;
+                                  const bp = (m.black / total) * 100;
+                                  return (
+                                    <div key={i} style={{display: 'flex', alignItems: 'center', gap: 8, fontSize: 12, fontFamily: "'Space Mono',monospace"}}>
+                                      <div style={{width: 36, fontWeight: 700, color: '#e8d5b5', cursor:'pointer'}} 
+                                        onClick={()=>{if(isLive&&!thinking&&!over){const mObj=uciToMove(m.uci,board,turn,ep);if(mObj)applyMv(board,mObj,ep,cas,turn);}}}>
+                                        {m.san}
+                                      </div>
+                                      <div style={{flex: 1, display: 'flex', height: 8, borderRadius: 4, overflow: 'hidden', opacity: 0.9}}>
+                                        <div style={{width: `${wp}%`, background: '#e8d5b5'}} title={`White: ${Math.round(wp)}%`}/>
+                                        <div style={{width: `${dp}%`, background: '#8a8580'}} title={`Draw: ${Math.round(dp)}%`}/>
+                                        <div style={{width: `${bp}%`, background: '#333'}} title={`Black: ${Math.round(bp)}%`}/>
+                                      </div>
+                                    </div>
+                                  );
+                                })}
+                              </div>
+                            )}
+                          </>
+                        )}
+                      </div>
+                    )}
+
+                    <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',marginBottom:8}}>
+                      <div style={{fontSize:11,color:'#666',fontWeight:700,letterSpacing:0.8,textTransform:'uppercase'}}>수 기록</div>
+                      <div style={{display:'flex',gap:6}}>
+                        <button onClick={handleImportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'3px 6px',borderRadius:4,cursor:'pointer',fontWeight:700}}>📥 불러오기</button>
+                        <button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'3px 6px',borderRadius:4,cursor:'pointer',fontWeight:700}}>📋 내보내기</button>
+                      </div>
+                    </div>
                     <div style={{display:'flex',flexDirection:'column',gap:1}}>
                       {Array.from({length:Math.ceil(hist.length/2)}).map((_,i)=>{
                         const w=hist[i*2],b=hist[i*2+1];
@@ -1282,6 +1624,39 @@ export default function ChessEngine(){
         ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:3px}
         input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5)}
         input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer}
+        
+        /* Default Desktop Layout */
+        .top-bar { height:52px; background:#1a1816; border-bottom:1px solid rgba(255,255,255,0.1); display:flex; align-items:center; padding:0 20px; gap:10px; flex-shrink:0; }
+        .top-title { display:flex; align-items:baseline; gap:10px; margin-right:2px; }
+        .top-buttons { display:flex; gap:10px; }
+        .elo-controls { display:flex; align-items:center; gap:8px; margin-left:auto; }
+        .main-layout { flex:1; display:flex; flex-direction:row; overflow:hidden; min-height:0; }
+        .board-section { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; padding:10px 20px; min-width:0; }
+        .right-panel { width:400px; background:#111; border-left:1px solid rgba(255,255,255,0.05); display:flex; flex-direction:column; overflow:hidden; flex-shrink:0; box-shadow:-10px 0 30px rgba(0,0,0,0.5); }
+        .player-row { width:min(calc(100vh - 142px), calc(100vw - 438px), 742px); }
+        .chess-board { width:min(calc(100vh - 184px), calc(100vw - 480px), 700px); height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
+        .eval-bar { height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
+        .chess-piece { font-size: min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px); }
+
+        /* Responsive Mobile Layout */
+        @media (max-width: 900px) {
+          .hide-on-mobile { display: none !important; }
+          .top-bar { padding: 0 10px; gap: 6px; justify-content: space-between; }
+          .top-buttons { gap: 6px; }
+          .top-title { margin-right: 0; }
+          .elo-controls { margin-left: 0; }
+          
+          .main-layout { flex-direction: column; overflow-y: auto; }
+          .board-section { padding: 10px 5px; flex: none; }
+          .right-panel { width: 100%; border-left: none; border-top: 1px solid rgba(255,255,255,0.1); flex: none; height: auto; min-height: 400px; box-shadow: none; }
+          
+          .player-row { width: 100%; max-width: 600px; }
+          .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
+          .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
+          .chess-piece { font-size: calc((100vw - 52px) / 8 * 0.75); max-font-size: 56px; }
+          
+          .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
+        }
       `}</style>
     </div>
   );
