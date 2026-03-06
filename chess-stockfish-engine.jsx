@@ -411,6 +411,8 @@ export default function ChessEngine(){
   const sfPVRef=useRef('');
   const sfLiveEvalRef=useRef(false);
   const sfAiSideRef=useRef(null);
+  const sfHintModeRef=useRef(false);
+  const sfHintCtxRef=useRef(null);
 
   const ac=pc==='w'?'b':'w';
   const flip=pc==='b';
@@ -438,7 +440,21 @@ export default function ChessEngine(){
               }
             }
           }
-          if(line.includes(' pv '))sfPVRef.current=line;
+          if(line.includes(' pv ')){
+            sfPVRef.current=line;
+            if(sfHintModeRef.current&&sfHintCtxRef.current){
+              const {board:hb,turn:ht,ep:he}=sfHintCtxRef.current;
+              const pv=parsePV(line,hb,ht,he);
+              if(pv.length>0){
+                const uciFirst=line.match(/\bpv\s+([a-h][1-8][a-h][1-8][qrbn]?)/)?.[1];
+                if(uciFirst){
+                  const fc='abcdefgh'.indexOf(uciFirst[0]),fr=8-parseInt(uciFirst[1]);
+                  const tc='abcdefgh'.indexOf(uciFirst[2]),tr=8-parseInt(uciFirst[3]);
+                  setHintMove({f:fr*8+fc,t:tr*8+tc,pv});
+                }
+              }
+            }
+          }
         }
         if(line.startsWith('bestmove')&&sfCallbackRef.current){
           const bm=line.split(' ')[1];
@@ -603,18 +619,34 @@ export default function ChessEngine(){
   const swap=useCallback(()=>setPc(p=>p==='w'?'b':'w'),[]);
 
   const handleHint=useCallback(()=>{
-    if(hintMove){setHintMove(null);return;}
-    if(hintThinking||thinking||over||viewIdx!==null)return;
+    if(hintMove||hintThinking){
+      sfHintModeRef.current=false;
+      sfHintCtxRef.current=null;
+      sfCallbackRef.current=null;
+      setHintMove(null);
+      setHintThinking(false);
+      return;
+    }
+    if(thinking||over||viewIdx!==null)return;
     setHintThinking(true);
     const b=board,e=ep,c=cas,t=turn;
     if(sfReadyRef.current&&sfWorkerRef.current){
+      sfHintModeRef.current=true;
+      sfHintCtxRef.current={board:b,turn:t,ep:e};
       sfCallbackRef.current=(uciMove,_sfEval,pvLine)=>{
-        if(uciMove&&uciMove!=='(none)'){
-          const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
-          const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
-          const pv=pvLine?parsePV(pvLine,b,t,e):[];
-          setHintMove({f:fr*8+fc,t:tr*8+tc,pv});
-        }
+        sfHintModeRef.current=false;
+        sfHintCtxRef.current=null;
+        // 실시간 업데이트로 이미 PV가 있으면 덮어쓰지 않음
+        setHintMove(prev=>{
+          if(prev&&prev.pv?.length>0)return prev;
+          if(uciMove&&uciMove!=='(none)'){
+            const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
+            const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
+            const pv=pvLine?parsePV(pvLine,b,t,e):[];
+            return{f:fr*8+fc,t:tr*8+tc,pv};
+          }
+          return prev;
+        });
         setHintThinking(false);
       };
       sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
@@ -1123,7 +1155,7 @@ export default function ChessEngine(){
             )}
             {hintMove&&(
               <div style={{marginTop:8}}>
-                {pvExploreIdx===null&&hintMove.pv?.length>0&&(
+                {pvExploreIdx===null&&!hintThinking&&hintMove.pv?.length>0&&(
                   <button onClick={()=>enterPVExplore(board,turn,ep,cas,last,hintMove.pv)}
                     style={{width:'100%',padding:'7px 12px',background:'rgba(60,220,130,0.12)',color:'#3cdc82',border:'1px solid rgba(60,220,130,0.35)',borderRadius:8,fontSize:12,cursor:'pointer',fontWeight:700,fontFamily:"'Space Mono',monospace",textAlign:'left'}}>
                     🔍 계속수 탐색 ({hintMove.pv.length}수)
