@@ -20,14 +20,14 @@ This is a single-page React + Vite chess application. The entire game logic and 
 
 The AI uses **two engines in priority order**:
 
-1. **Stockfish WASM** (primary) — loaded as a Web Worker from `/public/stockfish.js` + `/public/stockfish.wasm`. Communicates via UCI protocol over `postMessage`. Skill level is mapped per difficulty via `SF_SKILL[]`.
+1. **Stockfish WASM** (primary) — loaded as a Web Worker from `/public/stockfish.js` + `/public/stockfish.wasm`. Communicates via UCI protocol over `postMessage`. Skill level is mapped per difficulty via `DIFFS[].skill`.
 2. **Built-in alpha-beta engine** (fallback) — used when Stockfish is not yet ready (`sfReadyRef.current === false`). Implements iterative deepening, alpha-beta pruning, quiescence search, MVV-LVA move ordering, and late move reduction.
 
 ### Key Data Structures
 
 - **Board**: flat 64-element integer array (index `r*8+c`). Piece constants: `E=0, WP=1…WK=6, BP=7…BK=12`.
 - **Move object**: `{f, t, pr?, ep?, cas?, dbl?}` — from/to square indices, optional promotion piece, en-passant flag, castling side, double-pawn flag.
-- **Game state** (React state): `board`, `turn` (`'w'`/`'b'`), `ep` (en-passant target square or null), `cas` (castling rights string e.g. `'KQkq'`), `sel`, `lm` (legal moves for selected piece), `over`, `promo`, `hist`, `capW`/`capB`.
+- **Game state** (React state): `board`, `turn` (`'w'`/`'b'`), `ep` (en-passant target square or null), `cas` (castling rights string e.g. `'KQkq'`), `sel`, `lm` (legal moves for selected piece), `over`, `promo`, `hist`, `capW`/`capB`, `elo` (player-selected AI rating, 600–2400).
 
 ### COOP/COEP Headers Requirement
 
@@ -39,7 +39,7 @@ These are set in both `vite.config.js` (dev server) and `vercel.json` (productio
 
 ### Difficulty System
 
-`DIFFS[]` (10 levels, index `di`) controls `depth`, `time` (ms), and `rand` (centipawn noise) for both engines. Stockfish additionally uses `SF_SKILL[]` to set UCI Skill Level (0–20).
+`DIFFS[]` (19 levels, ELO 600–2400) maps each difficulty to `depth`, `time` (ms), `rand` (centipawn noise), and `skill` (UCI Skill Level 0–20). The user selects an `elo` value, which is matched to the nearest `DIFFS` entry at runtime.
 
 ### FEN / UCI Conversion
 

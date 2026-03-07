@@ -1,11 +1,24 @@
 import { useState, useCallback, useEffect, useRef } from "react";
 
 // ═══════════════════════════════════════════════════
+// TUNING CONSTANTS
+// ═══════════════════════════════════════════════════
+const UCI_ELO_MIN = 1320;        // Stockfish UCI_Elo minimum threshold
+const OPENING_BOOK_PLY = 30;     // Max half-moves to consult opening book
+const HINT_MOVETIME_MS = 3000;   // Stockfish search time for hints
+const ANALYSIS_DEPTH = 12;       // Stockfish depth for post-game analysis
+const ANALYSIS_TIMEOUT_MS = 8000;// Watchdog timeout per analysis position
+
+// ═══════════════════════════════════════════════════
 // PIECE CONSTANTS
 // ═══════════════════════════════════════════════════
 const E=0,WP=1,WN=2,WB=3,WR=4,WQ=5,WK=6,BP=7,BN=8,BB=9,BR=10,BQ=11,BK=12;
 const SYM={[WP]:'♟',[WN]:'♞',[WB]:'♝',[WR]:'♜',[WQ]:'♛',[WK]:'♚',
   [BP]:'♟',[BN]:'♞',[BB]:'♝',[BR]:'♜',[BQ]:'♛',[BK]:'♚'};
+const PIECE_SVG={[WP]:'/pieces/wP.svg',[WN]:'/pieces/wN.svg',[WB]:'/pieces/wB.svg',
+  [WR]:'/pieces/wR.svg',[WQ]:'/pieces/wQ.svg',[WK]:'/pieces/wK.svg',
+  [BP]:'/pieces/bP.svg',[BN]:'/pieces/bN.svg',[BB]:'/pieces/bB.svg',
+  [BR]:'/pieces/bR.svg',[BQ]:'/pieces/bQ.svg',[BK]:'/pieces/bK.svg'};
 const isW=p=>p>=1&&p<=6, isB=p=>p>=7&&p<=12;
 const MAT_VAL={[WP]:1,[WN]:3,[WB]:3,[WR]:5,[WQ]:9,[WK]:0,[BP]:1,[BN]:3,[BB]:3,[BR]:5,[BQ]:9,[BK]:0};
 const mv=p=>MAT_VAL[p]||0;
@@ -547,7 +560,7 @@ export default function ChessEngine(){
   // Fetch opening info for current position
   useEffect(()=>{
     const idx = viewIdx !== null ? viewIdx : histStates.length - 1;
-    if(idx > 30) {
+    if(idx > OPENING_BOOK_PLY) {
       setOpeningInfo(null);
       return;
     }
@@ -635,9 +648,8 @@ export default function ChessEngine(){
           }
           setThinking(false);
         };
-        // Stockfish 16+ UCI_Elo has a minimum limit of 1320.
-        // For ELOs below 1320, we must rely on Skill Level (0-20) and depth/time limits.
-        if (currentElo >= 1320) {
+        // Below UCI_ELO_MIN, rely on Skill Level and depth/time limits instead.
+        if (currentElo >= UCI_ELO_MIN) {
           sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value true');
           sfWorkerRef.current.postMessage(`setoption name UCI_Elo value ${currentElo}`);
         } else {
@@ -757,7 +769,7 @@ export default function ChessEngine(){
       sfWorkerRef.current.postMessage('setoption name UCI_Elo value 3200');
       sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
       sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
-      sfWorkerRef.current.postMessage('go movetime 3000');
+      sfWorkerRef.current.postMessage(`go movetime ${HINT_MOVETIME_MS}`);
     }else{
       const result=findBestMove(b,e,c,t,3,600,0);
       if(result&&result.move)setHintMove({f:result.move.f,t:result.move.t});
@@ -961,10 +973,10 @@ export default function ChessEngine(){
               sfCallbackRef.current=null;
               doNext(null,sfEvalRef.current);
             }
-          },8000);
+          },ANALYSIS_TIMEOUT_MS);
           sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
           sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
-          sfWorkerRef.current.postMessage('go depth 12'); // depth-only: predictable finish time
+          sfWorkerRef.current.postMessage(`go depth ${ANALYSIS_DEPTH}`); // depth-only: predictable finish time
         }else{
           const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
           evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
@@ -1073,9 +1085,9 @@ export default function ChessEngine(){
     const g={};order.forEach(p=>g[p]=0);pieces.forEach(p=>g[p]=(g[p]||0)+1);
     return(<div style={{display:'flex',alignItems:'center',gap:1,minHeight:26,flexWrap:'wrap'}}>
       {order.map(p=>{if(!g[p])return null;return Array.from({length:g[p]}).map((_,i)=>(
-        <span key={`${p}-${i}`} style={{fontSize:17,lineHeight:1,marginRight:i===g[p]-1?3:-3,
-          color:isW(p)?'#f5f0e8':'#555',WebkitTextStroke:isW(p)?'0.5px #4a3520':'none',
-          filter:isW(p)?'drop-shadow(0 1px 1px rgba(0,0,0,0.6))':'none'}}>{SYM[p]}</span>))})}
+        <img key={`${p}-${i}`} src={PIECE_SVG[p]} alt="" draggable={false}
+          style={{width:20,height:20,marginRight:i===g[p]-1?3:-3,
+          filter:'drop-shadow(0 1px 1px rgba(0,0,0,0.4))'}}/>))})}
       {adv>0&&<span style={{fontSize:12,fontWeight:700,color:'#7ecf7e',fontFamily:"'Space Mono',monospace",marginLeft:4}}>+{adv}</span>}
     </div>);
   };
@@ -1094,11 +1106,8 @@ export default function ChessEngine(){
         style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
-        {!!piece&&<span className="chess-piece" style={{lineHeight:1,zIndex:1,
-          color:isW(piece)?'#ffffff':'#111111',
-          WebkitTextStroke:isW(piece)?'1px #222':'1px #eee',
-          textShadow:isW(piece)?'0 2px 4px rgba(0,0,0,0.5)':'0 2px 4px rgba(0,0,0,0.5)'
-        }}>{SYM[piece]}</span>}
+        {!!piece&&<img className="chess-piece" src={PIECE_SVG[piece]} alt="" draggable={false}
+          style={{width:'85%',height:'85%',zIndex:1,filter:'drop-shadow(0 1px 2px rgba(0,0,0,0.4))',pointerEvents:'none'}}/>}
         {ci===0&&<span style={{position:'absolute',top:2,left:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{RL[flip?7-ri:ri]}</span>}
         {ri===7&&<span style={{position:'absolute',bottom:1,right:3,fontSize:12,fontWeight:700,color:lt?'#b58863':'#e8d5b5',opacity:0.8}}>{FL[flip?7-ci:ci]}</span>}
       </div>);}
@@ -1182,7 +1191,7 @@ export default function ChessEngine(){
           {/* Opponent row */}
           <div className="player-row top" style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
-              <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:ac==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:ac==='w'?'0':'0.5px #000'}}>{ac==='w'?'♔':'♚'}</div>
+              <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={ac==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:32,height:32}}/></div>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
                 <div style={{fontSize:12,color:'#8a8580'}}>ELO {elo} · d{d.depth}</div>
@@ -1236,8 +1245,8 @@ export default function ChessEngine(){
                   <div style={{background:'#2c2a28',borderRadius:12,padding:'20px 16px',display:'flex',gap:12,boxShadow:'0 6px 28px rgba(0,0,0,0.7)'}}>
                     {promo.mvs.map((m,i)=>(
                       <button key={i} onClick={()=>doPromo(m)}
-                        style={{width:70,height:70,fontSize:46,background:'rgba(255,255,255,0.08)',border:'2px solid rgba(255,255,255,0.18)',borderRadius:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',color:'#fff'}}>
-                        {SYM[m.pr]}</button>))}
+                        style={{width:70,height:70,background:'rgba(255,255,255,0.08)',border:'2px solid rgba(255,255,255,0.18)',borderRadius:10,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center'}}>
+                        <img src={PIECE_SVG[m.pr]} alt="" draggable={false} style={{width:50,height:50}}/></button>))}
                   </div>
                 </div>)}
             </div>
@@ -1246,7 +1255,7 @@ export default function ChessEngine(){
           {/* Player row */}
           <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginTop:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
-              <div style={{width:46,height:46,borderRadius:8,background:pc==='w'?'#3a3028':'#d4c49a',border:`2px solid ${pc==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:26,color:pc==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:pc==='w'?'0':'0.5px #000'}}>{pc==='w'?'♔':'♚'}</div>
+              <div style={{width:46,height:46,borderRadius:8,background:pc==='w'?'#3a3028':'#d4c49a',border:`2px solid ${pc==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={pc==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:32,height:32}}/></div>
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>You</div>
                 <div style={{fontSize:12,color:'#8a8580'}}>{pc==='w'?'White':'Black'}</div>
@@ -1401,7 +1410,7 @@ export default function ChessEngine(){
                   <div style={{fontSize:12,color:'#8a8580'}}>플레이어</div>
                   {[pc,pc==='w'?'b':'w'].map(color=>(
                     <div key={color} style={{background:color==='w'?'rgba(220,212,200,0.07)':'rgba(40,36,32,0.5)',borderRadius:7,padding:'7px',textAlign:'center',border:'1px solid rgba(255,255,255,0.06)'}}>
-                      <div style={{width:36,height:36,borderRadius:6,background:color==='w'?'#3a3028':'#d4c49a',border:`2px solid ${color==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',fontSize:22,margin:'0 auto 3px',color:color==='w'?'#f5f0e8':'#1a1410',WebkitTextStroke:color==='w'?'0':'0.5px #000'}}>{color==='w'?'♔':'♚'}</div>
+                      <div style={{width:36,height:36,borderRadius:6,background:color==='w'?'#3a3028':'#d4c49a',border:`2px solid ${color==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 3px'}}><img src={color==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:24,height:24}}/></div>
                       <div style={{fontSize:11,color:'#8a8580'}}>{color===pc?'You':'AI'}</div>
                     </div>
                   ))}
@@ -1636,7 +1645,7 @@ export default function ChessEngine(){
         .player-row { width:min(calc(100vh - 142px), calc(100vw - 438px), 742px); }
         .chess-board { width:min(calc(100vh - 184px), calc(100vw - 480px), 700px); height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
         .eval-bar { height:min(calc(100vh - 184px), calc(100vw - 480px), 700px); }
-        .chess-piece { font-size: min(calc((100vh - 184px) / 8 * 0.75), calc((100vw - 480px) / 8 * 0.75), 65px); }
+        .chess-piece { display: block; }
 
         /* Responsive Mobile Layout */
         @media (max-width: 900px) {
@@ -1653,7 +1662,7 @@ export default function ChessEngine(){
           .player-row { width: 100%; max-width: 600px; }
           .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
           .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
-          .chess-piece { font-size: calc((100vw - 52px) / 8 * 0.75); max-font-size: 56px; }
+          .chess-piece { display: block; }
           
           .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
         }
