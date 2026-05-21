@@ -2,3 +2,7 @@ node_modules/
 dist/
 .env
 .DS_Store
+
+# Lichess puzzle DB downloads (consumed by scripts/generate-puzzles.cjs, not bundled)
+public/lichess_db_puzzle.csv/
+public/lichess_db_puzzle.csv.zst

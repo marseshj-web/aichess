@@ -1,0 +1,23 @@
+[
+  {
+    "id": "sample01",
+    "fen": "r1bqkbnr/pppp1ppp/2n5/4p2Q/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 3 3",
+    "moves": ["g8f6", "h5f7"],
+    "rating": 1200,
+    "themes": ["mateIn1", "short"]
+  },
+  {
+    "id": "back01",
+    "fen": "r5k1/5ppp/8/8/8/8/5PPP/4R1K1 b - - 0 1",
+    "moves": ["a8a2", "e1e8"],
+    "rating": 1650,
+    "themes": ["backRankMate", "mateIn1", "short"]
+  },
+  {
+    "id": "back02",
+    "fen": "6k1/5ppp/5r2/8/8/8/5PPP/4R1K1 b - - 0 1",
+    "moves": ["f6g6", "e1e8"],
+    "rating": 1750,
+    "themes": ["backRankMate", "mateIn1", "short"]
+  }
+]

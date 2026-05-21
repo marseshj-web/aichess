@@ -44,3 +44,18 @@ These are set in both `vite.config.js` (dev server) and `vercel.json` (productio
 ### FEN / UCI Conversion
 
 `boardToFEN()` converts internal board state → FEN string for Stockfish input. `uciToMove()` parses Stockfish's UCI move response back into an internal move object, inferring en-passant, castling, and promotion flags from board context.
+
+### Refreshing the Puzzle Pool
+
+The app loads puzzle IDs from `public/puzzle-ids.json` and lazily fetches each puzzle's FEN + solution from `https://lichess.org/api/puzzle/{id}` at runtime. Responses are cached in `localStorage` (`aichess_puzzle_cache_v1`).
+
+**Recommended (CSV-based, ~1500 puzzles, all ELO bands):**
+1. Download `lichess_db_puzzle.csv.zst` from https://database.lichess.org/#puzzles (~650 MB compressed)
+2. Decompress to `lichess_db_puzzle.csv` (~3 GB)
+   - Windows: `choco install zstandard` then `zstd -d lichess_db_puzzle.csv.zst`, or use 7-Zip
+   - macOS/Linux: `zstd -d lichess_db_puzzle.csv.zst`
+3. Run: `node scripts/generate-puzzles.cjs /path/to/lichess_db_puzzle.csv`
+   → Overwrites `public/puzzle-ids.json` with 1500 curated puzzles (250 per ELO band, filtered by `plays ≥ 500`, `rd ≤ 200`)
+
+**Fallback (HTML scraping, ~100 puzzles, no CSV download):**
+- `npm run puzzles` — scrapes Lichess `/training`. Slow, heavily rate-limited, ELO-biased toward 1300–1600.

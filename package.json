@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "vite",
     "build": "vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "puzzles": "node scripts/fetch-puzzle-ids.cjs",
+    "puzzles:csv": "node scripts/generate-puzzles.cjs"
   },
   "dependencies": {
     "react": "^18.3.1",

@@ -278,6 +278,20 @@ const W_ORD=[WQ,WR,WB,WN,WP], B_ORD=[BQ,BR,BB,BN,BP];
 // ═══════════════════════════════════════════════════
 // STOCKFISH INTEGRATION HELPERS
 // ═══════════════════════════════════════════════════
+// Parse a FEN string into the internal board representation
+function fenToBoard(fen){
+  const parts=fen.split(' ');
+  const bd=new Array(64).fill(0);
+  const pm={r:BR,n:BN,b:BB,q:BQ,k:BK,p:BP,R:WR,N:WN,B:WB,Q:WQ,K:WK,P:WP};
+  let i=0;
+  for(const ch of parts[0])if(ch==='/')continue;else if(ch>='1'&&ch<='8')i+=+ch;else bd[i++]=pm[ch];
+  const turn=parts[1]==='w'?'w':'b';
+  const cas=parts[2]==='-'?'':parts[2];
+  let ep=null;
+  if(parts[3]&&parts[3]!=='-'){ep=(8-+parts[3][1])*8+'abcdefgh'.indexOf(parts[3][0]);}
+  return{board:bd,turn,cas,ep};
+}
+
 // Convert internal board array + game state to UCI FEN string
 function boardToFEN(bd,col,ep,cas){
   const PC={[WP]:'P',[WN]:'N',[WB]:'B',[WR]:'R',[WQ]:'Q',[WK]:'K',
@@ -391,6 +405,27 @@ const playSound = (type) => {
 };
 
 // ═══════════════════════════════════════════════════
+// PUZZLE UTILITIES — Lichess API integration
+// ═══════════════════════════════════════════════════
+const PUZZLE_CACHE_KEY = 'aichess_puzzle_cache_v1';
+
+function lichessToInternal(d){
+  return{id:d.puzzle.id,fen:d.puzzle.fen,moves:d.puzzle.solution,
+    rating:d.puzzle.rating,themes:d.puzzle.themes};
+}
+function loadPuzzleCache(){
+  try{return JSON.parse(localStorage.getItem(PUZZLE_CACHE_KEY)||'{}');}
+  catch{return{};}
+}
+function savePuzzleCacheEntry(id,puzzle){
+  try{
+    const c=loadPuzzleCache();
+    c[id]=puzzle;
+    localStorage.setItem(PUZZLE_CACHE_KEY,JSON.stringify(c));
+  }catch{}
+}
+
+// ═══════════════════════════════════════════════════
 // REACT COMPONENT
 // ═══════════════════════════════════════════════════
 let localOpeningsDB = null;
@@ -429,6 +464,11 @@ export default function ChessEngine(){
   const[pvExploreIdx,setPvExploreIdx]=useState(null);
   const[soundOn,setSoundOn]=useState(true);
   const[openingInfo,setOpeningInfo]=useState(null);
+  const[puzzleMode,setPuzzleMode]=useState(false);
+  const[puzzleData,setPuzzleData]=useState(null);
+  const[puzzleStatus,setPuzzleStatus]=useState('idle');
+  const[puzzleMoveIdx,setPuzzleMoveIdx]=useState(0);
+  const[puzzleSolvedEval,setPuzzleSolvedEval]=useState(null);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -454,6 +494,10 @@ export default function ChessEngine(){
   const sfAiSideRef=useRef(null);
   const sfHintModeRef=useRef(false);
   const sfHintCtxRef=useRef(null);
+  const puzzleMoveIdxRef=useRef(0);
+  const puzzleIdsRef=useRef(null);
+  const puzzleCacheRef=useRef({});
+  const setPMI=useCallback(n=>{puzzleMoveIdxRef.current=n;setPuzzleMoveIdx(n);},[]);
 
   const ac=pc==='w'?'b':'w';
   const flip=pc==='b';
@@ -525,6 +569,8 @@ export default function ChessEngine(){
     setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);setAnalyzing(false);
     setAnalysisProgress({current:0,total:0});setReviewMode(false);
     setOpeningInfo(null);
+    setPuzzleMode(false);setPuzzleData(null);setPuzzleStatus('idle');setPuzzleMoveIdx(0);
+    puzzleMoveIdxRef.current=0;
     setGameKey(k=>k+1);
   },[]);
 
@@ -559,6 +605,7 @@ export default function ChessEngine(){
 
   // Fetch opening info for current position
   useEffect(()=>{
+    if(puzzleMode){setOpeningInfo(null);return;}
     const idx = viewIdx !== null ? viewIdx : histStates.length - 1;
     if(idx > OPENING_BOOK_PLY) {
       setOpeningInfo(null);
@@ -615,10 +662,11 @@ export default function ChessEngine(){
 
     const cleanup = checkLocalAndFetch();
     return () => { cleanup.then(c => c && c()); };
-  },[viewIdx, histStates]);
+  },[viewIdx, histStates, puzzleMode]);
 
   // AI turn – Stockfish preferred; built-in alpha-beta as fallback
   useEffect(()=>{
+    if(puzzleMode)return;
     const aiC=pR.current==='w'?'b':'w';
     if(turn!==aiC||oR.current||thR.current)return;
     setThinking(true);
@@ -648,7 +696,6 @@ export default function ChessEngine(){
           }
           setThinking(false);
         };
-        // Below UCI_ELO_MIN, rely on Skill Level and depth/time limits instead.
         if (currentElo >= UCI_ELO_MIN) {
           sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value true');
           sfWorkerRef.current.postMessage(`setoption name UCI_Elo value ${currentElo}`);
@@ -697,7 +744,7 @@ export default function ChessEngine(){
       setThinking(false);
     },50);
     return()=>clearTimeout(tid);
-  },[turn,applyMv,gameKey]);
+  },[turn,applyMv,gameKey,puzzleMode]);
 
   const enterPVExplore=useCallback((originBoard,originTurn,originEp,originCas,originLast,pvMoves)=>{
     const states=[{board:originBoard,turn:originTurn,last:originLast}];
@@ -717,21 +764,157 @@ export default function ChessEngine(){
     setPvExploreIdx(null);setPvExploreStates(null);
   },[]);
 
+  const loadPuzzleIndex=useCallback(async()=>{
+    if(puzzleIdsRef.current)return;
+    const r=await fetch('/puzzle-ids.json');
+    if(!r.ok)throw new Error('puzzle index unavailable');
+    puzzleIdsRef.current=await r.json();
+    puzzleCacheRef.current=loadPuzzleCache();
+  },[]);
+
+  const fetchPuzzleById=useCallback(async(id)=>{
+    if(puzzleCacheRef.current[id])return puzzleCacheRef.current[id];
+    const r=await fetch(`https://lichess.org/api/puzzle/${id}`);
+    if(!r.ok)throw new Error(`puzzle ${id} fetch failed`);
+    const data=await r.json();
+    if(!data?.puzzle?.fen||!data?.puzzle?.solution?.length)throw new Error('invalid puzzle data');
+    const pz=lichessToInternal(data);
+    puzzleCacheRef.current[id]=pz;
+    savePuzzleCacheEntry(id,pz);
+    return pz;
+  },[]);
+
+  const enterPuzzleMode=useCallback(async()=>{
+    try{await loadPuzzleIndex();}
+    catch{alert('퍼즐 인덱스를 불러올 수 없습니다.\n`npm run puzzles` 실행 후 새로고침해주세요.');return;}
+    const idx=puzzleIdsRef.current;
+    if(!idx?.length){alert('퍼즐 풀이 비어있습니다. `npm run puzzles`를 실행하세요.');return;}
+    const center=Math.min(3000,eloR.current+600);
+    const currentId=puzzleData?.id;
+    let pool=idx.filter(p=>p.rating>=center-200&&p.rating<=center+200&&p.id!==currentId);
+    if(!pool.length)pool=idx.filter(p=>p.rating>=center-200&&p.rating<=center+200);
+    if(!pool.length)pool=idx.filter(p=>p.id!==currentId);
+    if(!pool.length)pool=idx;
+    const pick=pool[Math.floor(Math.random()*pool.length)];
+    setPuzzleStatus('loading');
+    let pz;
+    try{pz=await fetchPuzzleById(pick.id);}
+    catch{
+      alert('Lichess 퍼즐 fetch 실패. 인터넷 연결을 확인하세요.');
+      setPuzzleStatus('idle');return;
+    }
+    const{board:pb,turn:pt,cas:pc_,ep:pe}=fenToBoard(pz.fen);
+    // Lichess convention: solution[0] is the SOLVER's first move.
+    // The player's color matches the FEN turn (whoever is to move).
+    const playerCol=pt;
+    setBoard(pb);setTurn(pt);setCas(pc_);setEp(pe);setSel(null);setLm([]);
+    setOver(null);setThinking(false);setLast(null);setCapW([]);setCapB([]);setHist([]);
+    setPromo(null);setPc(playerCol);setEvalScore(null);setSearchInfo('');
+    setHistStates([{board:pb,turn:pt,ep:pe,cas:pc_,last:null,capW:[],capB:[]}]);
+    setViewIdx(null);setHintMove(null);setHintThinking(false);
+    setPvExploreIdx(null);setPvExploreStates(null);
+    analysisAbortRef.current=true;
+    setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);
+    setAnalyzing(false);setAnalysisProgress({current:0,total:0});
+    setReviewMode(false);setOpeningInfo(null);
+    setPMI(0);
+    setPuzzleData(pz);
+    setPuzzleSolvedEval(null);
+    setPuzzleStatus('playing');
+    setPuzzleMode(true);
+  },[loadPuzzleIndex,fetchPuzzleById,puzzleData,setPMI]);
+
+  const exitPuzzleMode=useCallback(()=>reset(),[reset]);
+
+  // When puzzle is solved, kick off a Stockfish eval on the final position
+  useEffect(()=>{
+    if(!puzzleMode||puzzleStatus!=='solved')return;
+    if(!sfReadyRef.current||!sfWorkerRef.current){setPuzzleSolvedEval(null);return;}
+    setPuzzleSolvedEval(null);
+    const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
+    const playerSide=pR.current;
+    const w=sfWorkerRef.current;
+    sfCallbackRef.current=(_uciMove,sfEval)=>{
+      if(sfEval==null){setPuzzleSolvedEval(null);return;}
+      // sfEval is from side-to-move perspective; flip to player perspective
+      const fromWhite=t==='w'?sfEval:-sfEval;
+      const fromPlayer=playerSide==='w'?fromWhite:-fromWhite;
+      setPuzzleSolvedEval(fromPlayer);
+    };
+    sfLiveEvalRef.current=false;
+    sfHintModeRef.current=false;
+    w.postMessage('setoption name UCI_LimitStrength value false');
+    w.postMessage('setoption name Skill Level value 20');
+    w.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
+    w.postMessage('go depth 14');
+    return()=>{sfCallbackRef.current=null;};
+  },[puzzleMode,puzzleStatus]);
+
+  // Auto-play opponent moves in puzzle mode (odd indices: 1, 3, 5, ...).
+  // Player moves are at even indices (0, 2, 4, ...) and clicked by the user.
+  useEffect(()=>{
+    if(!puzzleMode||!puzzleData||puzzleStatus!=='playing')return;
+    const idx=puzzleMoveIdxRef.current;
+    if(idx%2!==1||idx>=puzzleData.moves.length)return;
+    const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
+    const timer=setTimeout(()=>{
+      const m=uciToMove(puzzleData.moves[idx],b,t,e);
+      if(m){
+        applyMv(b,m,e,c,t);
+        const next=idx+1;
+        setPMI(next);
+        if(next>=puzzleData.moves.length)setPuzzleStatus('solved');
+      }
+    },500);
+    return()=>clearTimeout(timer);
+  },[puzzleMode,puzzleData,puzzleStatus,board,turn,applyMv,setPMI]);
+
   const click=useCallback((idx)=>{
     if(viewIdx!==null||pvExploreIdx!==null||turn!==pc||over||thinking)return;
+    if(puzzleMode&&puzzleStatus!=='playing')return;
     const myP=pc==='w'?isW:isB;
     const myPawn=pc==='w'?WP:BP;
     const pRow=pc==='w'?0:7;
     if(sel!==null){
       const m=lm.find(m=>m.t===idx);
-      if(m){if(board[sel]===myPawn&&toRC(idx)[0]===pRow){setPromo({f:sel,t:idx,mvs:lm.filter(m=>m.t===idx)});return}
-        applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);return}
+      if(m){
+        if(board[sel]===myPawn&&toRC(idx)[0]===pRow){setPromo({f:sel,t:idx,mvs:lm.filter(m=>m.t===idx)});return}
+        if(puzzleMode&&puzzleData){
+          const expM=uciToMove(puzzleData.moves[puzzleMoveIdxRef.current],board,turn,ep);
+          if(!expM||m.f!==expM.f||m.t!==expM.t){
+            setPuzzleStatus('fail');
+            setTimeout(()=>setPuzzleStatus(s=>s==='fail'?'playing':s),1200);
+            setSel(null);setLm([]);return;
+          }
+          applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);
+          const next=puzzleMoveIdxRef.current+1;
+          setPMI(next);
+          if(next>=puzzleData.moves.length)setPuzzleStatus('solved');
+          return;
+        }
+        applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);return;
+      }
       if(myP(board[idx])){setSel(idx);setLm(legal(board,pc,ep,cas).filter(m=>m.f===idx));return}
       setSel(null);setLm([]);return}
     if(myP(board[idx])){setSel(idx);setLm(legal(board,pc,ep,cas).filter(m=>m.f===idx))}
-  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv,viewIdx,pc]);
+  },[sel,lm,board,turn,over,thinking,ep,cas,applyMv,viewIdx,pc,puzzleMode,puzzleStatus,puzzleData,setPMI]);
 
-  const doPromo=useCallback(m=>{applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);setPromo(null)},[board,ep,cas,pc,applyMv]);
+  const doPromo=useCallback(m=>{
+    if(puzzleMode&&puzzleData){
+      const expM=uciToMove(puzzleData.moves[puzzleMoveIdxRef.current],board,turn,ep);
+      if(!expM||m.f!==expM.f||m.t!==expM.t||(expM.pr&&m.pr!==expM.pr)){
+        setPuzzleStatus('fail');
+        setTimeout(()=>setPuzzleStatus(s=>s==='fail'?'playing':s),1200);
+        setPromo(null);setSel(null);setLm([]);return;
+      }
+      applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);setPromo(null);
+      const next=puzzleMoveIdxRef.current+1;
+      setPMI(next);
+      if(next>=puzzleData.moves.length)setPuzzleStatus('solved');
+      return;
+    }
+    applyMv(board,m,ep,cas,pc);setSel(null);setLm([]);setPromo(null);
+  },[board,ep,cas,pc,turn,applyMv,puzzleMode,puzzleData,setPMI]);
   const swap=useCallback(()=>setPc(p=>p==='w'?'b':'w'),[]);
 
   const handleHint=useCallback(()=>{
@@ -1065,8 +1248,8 @@ export default function ChessEngine(){
 
   // Navigation
   const effectiveIdx=viewIdx!==null?viewIdx:histStates.length-1;
-  const canBack=effectiveIdx>0;
-  const canFwd=effectiveIdx<histStates.length-1;
+  const canBack=effectiveIdx>0&&!puzzleMode;
+  const canFwd=effectiveIdx<histStates.length-1&&!puzzleMode;
   const isLive=viewIdx===null;
   const goBack=()=>setViewIdx(effectiveIdx-1);
   const goFwd=()=>{const next=effectiveIdx+1;if(next>=histStates.length-1)setViewIdx(null);else setViewIdx(next);};
@@ -1080,6 +1263,13 @@ export default function ChessEngine(){
   const displayCapW=viewState?viewState.capW:capW;
   const displayCapB=viewState?viewState.capB:capB;
   const displayMatAdv=(()=>{let wL=0,bL=0;displayCapW.forEach(p=>wL+=mv(p));displayCapB.forEach(p=>bL+=mv(p));return bL-wL})();
+
+  const renderKingAvatar=(color,size)=>{
+    const bg=color==='w'?'#3a3028':'#d4c49a';
+    const border=`2px solid ${color==='w'?'#6a5a4a':'#a89060'}`;
+    const imgSz=Math.round(size*0.7);
+    return <div style={{width:size,height:size,borderRadius:size>40?8:6,background:bg,border,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={PIECE_SVG[color==='w'?WK:BK]} alt="" style={{width:imgSz,height:imgSz}}/></div>;
+  };
 
   const renderCap=(pieces,order,adv)=>{
     const g={};order.forEach(p=>g[p]=0);pieces.forEach(p=>g[p]=(g[p]||0)+1);
@@ -1103,7 +1293,7 @@ export default function ChessEngine(){
       let bg=lt?'#e8d5b5':'#b58863';
       if(isLst)bg=lt?'#f6f680':'#baca44';if(isSel)bg='#7fc97f';if(isKC)bg='#e74c3c';
       sq.push(<div key={idx} onClick={()=>click(idx)} className="board-square"
-        style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:isLive&&turn===pc&&!over?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
+        style={{width:'12.5%',height:'12.5%',backgroundColor:bg,display:'flex',alignItems:'center',justifyContent:'center',position:'relative',cursor:(isLive&&turn===pc&&!over)||(puzzleMode&&puzzleStatus==='playing'&&turn===pc)?'pointer':'default',transition:'background-color 0.15s',userSelect:'none'}}>
         {isLeg&&!piece&&<div style={{width:'26%',height:'26%',borderRadius:'50%',backgroundColor:'rgba(0,0,0,0.18)'}}/>}
         {isLeg&&!!piece&&<div style={{position:'absolute',inset:0,border:'4px solid rgba(0,0,0,0.25)',borderRadius:'50%',boxSizing:'border-box'}}/>}
         {!!piece&&<img className="chess-piece" src={PIECE_SVG[piece]} alt="" draggable={false}
@@ -1145,6 +1335,10 @@ export default function ChessEngine(){
           <button onClick={()=>setSoundOn(!soundOn)}
             style={{padding:'7px 12px',background:soundOn?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:soundOn?'#3cdc82':'#888',border:`1px solid ${soundOn?'rgba(60,220,130,0.4)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontSize:14,cursor:'pointer',display:'flex',alignItems:'center',justifyContent:'center',transition:'all 0.2s'}}>
             {soundOn?'🔊':'🔇'}
+          </button>
+          <button onClick={puzzleMode?exitPuzzleMode:enterPuzzleMode}
+            style={{padding:'7px 12px',background:puzzleMode?'rgba(137,212,240,0.2)':'rgba(255,255,255,0.08)',color:puzzleMode?'#89d4f0':'#ccc',border:`1px solid ${puzzleMode?'rgba(137,212,240,0.5)':'rgba(255,255,255,0.14)'}`,borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap',transition:'all 0.2s',boxShadow:puzzleMode?'0 0 8px rgba(137,212,240,0.2)':'none'}}>
+            {puzzleMode?'게임 복귀':'🧩 퍼즐'}
           </button>
         </div>
         
@@ -1191,7 +1385,7 @@ export default function ChessEngine(){
           {/* Opponent row */}
           <div className="player-row top" style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
-              <div style={{width:46,height:46,borderRadius:8,background:ac==='w'?'#3a3028':'#d4c49a',border:`2px solid ${ac==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={ac==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:32,height:32}}/></div>
+              {renderKingAvatar(ac,46)}
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
                 <div style={{fontSize:12,color:'#8a8580'}}>ELO {elo} · d{d.depth}</div>
@@ -1255,7 +1449,7 @@ export default function ChessEngine(){
           {/* Player row */}
           <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginTop:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
-              <div style={{width:46,height:46,borderRadius:8,background:pc==='w'?'#3a3028':'#d4c49a',border:`2px solid ${pc==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={pc==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:32,height:32}}/></div>
+              {renderKingAvatar(pc,46)}
               <div>
                 <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>You</div>
                 <div style={{fontSize:12,color:'#8a8580'}}>{pc==='w'?'White':'Black'}</div>
@@ -1277,6 +1471,7 @@ export default function ChessEngine(){
               {histStates.length>1&&<button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'4px 6px',borderRadius:4,cursor:'pointer',fontWeight:700,transition:'all 0.2s'}}>📋 내보내기</button>}
               {viewIdx!==null&&pvExploreIdx===null&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#f0c040',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(240,192,64,0.4)',marginLeft:4}}>REVIEW</span>}
               {pvExploreIdx!==null&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#3cdc82',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(60,220,130,0.4)',marginLeft:4}}>PV 탐색</span>}
+              {puzzleMode&&<span style={{fontSize:10,fontWeight:800,color:'#111',background:'#89d4f0',padding:'3px 8px',borderRadius:4,boxShadow:'0 0 10px rgba(137,212,240,0.4)',marginLeft:4}}>PUZZLE</span>}
             </div>
           </div>
 
@@ -1346,18 +1541,18 @@ export default function ChessEngine(){
               
               <div style={{width:1,height:24,background:'rgba(255,255,255,0.1)',margin:'0 4px'}}/>
               
-              {(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
+              {!puzzleMode&&(()=>{const canUndo=!thinking&&histStates.length>=3&&isLive;return(
                 <button onClick={handleUndo} disabled={!canUndo}
                   style={{padding:'8px 14px',background:canUndo?'rgba(255,255,255,0.08)':'rgba(255,255,255,0.03)',color:canUndo?'#e8d5b5':'#444',border:'1px solid rgba(255,255,255,0.1)',borderRadius:8,fontSize:13,cursor:canUndo?'pointer':'default',fontWeight:700,transition:'all 0.2s'}}>↩ 무르기</button>
               );})()}
-              {(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
+              {!puzzleMode&&(()=>{const canHint=!thinking&&!over&&isLive;const active=!!hintMove;return(
                 <button onClick={handleHint} disabled={!canHint&&!active}
                   style={{padding:'8px 14px',background:active?'rgba(60,220,130,0.15)':'rgba(255,255,255,0.08)',color:!canHint&&!active?'#444':active?'#3cdc82':'#e8d5b5',border:`1px solid ${active?'rgba(60,220,130,0.5)':'rgba(255,255,255,0.1)'}`,borderRadius:8,fontSize:13,cursor:(canHint||active)?'pointer':'default',fontWeight:700,display:'flex',alignItems:'center',gap:6,transition:'all 0.2s',boxShadow:active?'0 0 10px rgba(60,220,130,0.2)':'none'}}>
                   {hintThinking?<span style={{display:'inline-block',width:10,height:10,borderRadius:'50%',border:'2px solid #3cdc82',borderTopColor:'transparent',animation:'spin 0.8s linear infinite'}}/>:'💡'}
                   {active?'끄기':'힌트'}
                 </button>
               );})()}
-              {(()=>{const canSurr=!over&&!thinking&&isLive&&hist.length>0;return(
+              {!puzzleMode&&(()=>{const canSurr=!over&&!thinking&&isLive&&hist.length>0;return(
                 <button onClick={handleSurrender} disabled={!canSurr}
                   style={{padding:'8px 14px',background:canSurr?'rgba(224,80,80,0.15)':'rgba(255,255,255,0.03)',color:canSurr?'#e05050':'#444',border:`1px solid ${canSurr?'rgba(224,80,80,0.4)':'rgba(255,255,255,0.1)'}`,borderRadius:8,fontSize:13,cursor:canSurr?'pointer':'default',fontWeight:700,transition:'all 0.2s'}}>
                   🏳 항복
@@ -1398,7 +1593,112 @@ export default function ChessEngine(){
 
           {/* Scrollable content */}
           <div style={{flex:1,overflowY:'auto',overflowX:'hidden'}}>
-            {reviewMode?(
+            {puzzleMode?(
+              <div style={{padding:'18px'}}>
+                {!puzzleData?(
+                  <div style={{textAlign:'center',color:'#666',fontSize:14}}>퍼즐 불러오는 중...</div>
+                ):(
+                  <>
+                    {/* Header */}
+                    <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+                      <span style={{fontSize:20}}>🧩</span>
+                      <div style={{flex:1}}>
+                        <div style={{fontWeight:700,fontSize:15,color:'#e8e0d5'}}>퍼즐</div>
+                        <div style={{fontSize:12,color:'#8a8580',fontFamily:"'Space Mono',monospace"}}>Rating {puzzleData.rating}</div>
+                      </div>
+                      <div style={{display:'flex',alignItems:'center',gap:6,padding:'5px 10px',borderRadius:6,background:pc==='w'?'rgba(220,212,200,0.12)':'rgba(40,36,32,0.6)',border:`1px solid ${pc==='w'?'rgba(220,212,200,0.3)':'rgba(255,255,255,0.15)'}`}}>
+                        <span style={{fontSize:14}}>{pc==='w'?'♔':'♚'}</span>
+                        <span style={{fontSize:12,fontWeight:700,color:pc==='w'?'#e8e0d5':'#b0a898'}}>당신은 {pc==='w'?'백':'흑'}</span>
+                      </div>
+                    </div>
+                    {/* Themes */}
+                    <div style={{display:'flex',flexWrap:'wrap',gap:4,marginBottom:14}}>
+                      {puzzleData.themes.slice(0,5).map(t=>(
+                        <span key={t} style={{fontSize:11,color:'#89d4f0',background:'rgba(137,212,240,0.1)',border:'1px solid rgba(137,212,240,0.25)',borderRadius:4,padding:'2px 6px',fontWeight:600}}>{t}</span>
+                      ))}
+                    </div>
+                    {/* Status */}
+                    <div style={{fontSize:14,fontWeight:700,marginBottom:14,padding:'10px 14px',borderRadius:8,
+                      background:puzzleStatus==='solved'?'rgba(126,207,126,0.12)':puzzleStatus==='fail'?'rgba(224,80,80,0.12)':'rgba(255,255,255,0.04)',
+                      border:`1px solid ${puzzleStatus==='solved'?'rgba(126,207,126,0.35)':puzzleStatus==='fail'?'rgba(224,80,80,0.35)':'rgba(255,255,255,0.08)'}`,
+                      color:puzzleStatus==='solved'?'#7ecf7e':puzzleStatus==='fail'?'#e05050':'#e8e0d5',
+                      transition:'all 0.3s'}}>
+                      <div>{puzzleStatus==='solved'?'✓ 정답!':
+                       puzzleStatus==='fail'?'✗ 틀렸습니다 — 다시 시도':
+                       puzzleMoveIdx%2===1?'⏳ 상대 수 분석 중...':'최선의 수를 찾으세요!'}</div>
+                      {puzzleStatus==='solved'&&(()=>{
+                        if(puzzleSolvedEval===null)return(<div style={{fontSize:11,fontWeight:500,color:'#7ecf7e99',marginTop:6,fontFamily:"'Space Mono',monospace"}}>최종 평가 분석 중…</div>);
+                        const abs=Math.abs(puzzleSolvedEval);
+                        const isMate=abs>=90000;
+                        const sign=puzzleSolvedEval>=0?'+':'';
+                        const display=isMate?(puzzleSolvedEval>0?'+M':'-M'):(sign+(puzzleSolvedEval/100).toFixed(1));
+                        const verdict=isMate?(puzzleSolvedEval>0?'외통수!':'상대 외통수'):
+                                       puzzleSolvedEval>=300?'크게 유리':
+                                       puzzleSolvedEval>=150?'유리':
+                                       puzzleSolvedEval>=50?'약간 유리':
+                                       puzzleSolvedEval>=-50?'호각':
+                                       puzzleSolvedEval>=-150?'약간 불리':'불리';
+                        const color=puzzleSolvedEval>=150?'#7ecf7e':puzzleSolvedEval>=-50?'#e8d090':'#e0a070';
+                        return(
+                          <div style={{fontSize:12,fontWeight:600,marginTop:8,fontFamily:"'Space Mono',monospace",color}}>
+                            최종 평가 <span style={{fontWeight:800}}>{display}</span> — {verdict}
+                          </div>
+                        );
+                      })()}
+                    </div>
+                    {/* Progress dots — one per player move (even indices) */}
+                    {puzzleData.moves.length>1&&(
+                      <div style={{display:'flex',gap:6,marginBottom:18,alignItems:'center'}}>
+                        <span style={{fontSize:11,color:'#666',marginRight:4}}>진행</span>
+                        {puzzleData.moves.filter((_,i)=>i%2===0).map((_,i)=>(
+                          <div key={i} style={{width:12,height:12,borderRadius:'50%',
+                            background:puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.35)':'rgba(255,255,255,0.1)',
+                            border:`1.5px solid ${puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.6)':'rgba(255,255,255,0.2)'}`,
+                            transition:'all 0.3s'}}/>
+                        ))}
+                      </div>
+                    )}
+                    {/* Buttons */}
+                    <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+                      {puzzleStatus==='playing'&&(
+                        <button onClick={()=>{
+                          if(puzzleMoveIdxRef.current%2===1)return;
+                          const m=uciToMove(puzzleData.moves[puzzleMoveIdxRef.current],board,turn,ep);
+                          if(m)setHintMove({f:m.f,t:m.t,pv:[]});
+                        }} style={{padding:'8px 14px',background:'rgba(60,220,130,0.12)',color:'#3cdc82',border:'1px solid rgba(60,220,130,0.35)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                          💡 힌트
+                        </button>
+                      )}
+                      {puzzleStatus==='playing'&&(
+                        <button onClick={()=>{
+                          setPuzzleStatus('solved');
+                          let idx=puzzleMoveIdxRef.current;
+                          const playNext=()=>{
+                            if(idx>=puzzleData.moves.length)return;
+                            const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
+                            const m=uciToMove(puzzleData.moves[idx],b,t,e);
+                            if(m)applyMv(b,m,e,c,t);
+                            setPMI(++idx);
+                            if(idx<puzzleData.moves.length)setTimeout(playNext,600);
+                          };
+                          setTimeout(playNext,100);
+                        }} style={{padding:'8px 14px',background:'rgba(255,255,255,0.06)',color:'#b0a898',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                          👁 해답 보기
+                        </button>
+                      )}
+                      <button onClick={enterPuzzleMode}
+                        style={{padding:'8px 14px',background:'rgba(137,212,240,0.15)',color:'#89d4f0',border:'1px solid rgba(137,212,240,0.4)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                        다음 퍼즐 →
+                      </button>
+                    </div>
+                    {/* ELO info */}
+                    <div style={{fontSize:11,color:'#444',fontFamily:"'Space Mono',monospace",lineHeight:1.6}}>
+                      ELO {elo} → 퍼즐 {Math.min(3000,elo+600)-200}~{Math.min(3000,elo+600)+200}
+                    </div>
+                  </>
+                )}
+              </div>
+            ):reviewMode?(
               <div style={{padding:'14px 18px'}}>
                 {/* Eval graph */}
                 <div style={{marginBottom:14,borderRadius:7,overflow:'hidden',border:'1px solid rgba(255,255,255,0.15)'}}>
@@ -1410,7 +1710,7 @@ export default function ChessEngine(){
                   <div style={{fontSize:12,color:'#8a8580'}}>플레이어</div>
                   {[pc,pc==='w'?'b':'w'].map(color=>(
                     <div key={color} style={{background:color==='w'?'rgba(220,212,200,0.07)':'rgba(40,36,32,0.5)',borderRadius:7,padding:'7px',textAlign:'center',border:'1px solid rgba(255,255,255,0.06)'}}>
-                      <div style={{width:36,height:36,borderRadius:6,background:color==='w'?'#3a3028':'#d4c49a',border:`2px solid ${color==='w'?'#6a5a4a':'#a89060'}`,display:'flex',alignItems:'center',justifyContent:'center',margin:'0 auto 3px'}}><img src={color==='w'?PIECE_SVG[WK]:PIECE_SVG[BK]} alt="" style={{width:24,height:24}}/></div>
+                      <div style={{margin:'0 auto 3px',width:'fit-content'}}>{renderKingAvatar(color,36)}</div>
                       <div style={{fontSize:11,color:'#8a8580'}}>{color===pc?'You':'AI'}</div>
                     </div>
                   ))}
@@ -1616,7 +1916,7 @@ export default function ChessEngine(){
               </div>
             </div>
           )}
-          {over&&!analyzing&&!reviewMode&&hist.length>1&&(
+          {over&&!analyzing&&!reviewMode&&!puzzleMode&&hist.length>1&&(
             <div style={{padding:'12px 18px',borderTop:'1px solid rgba(255,255,255,0.08)',flexShrink:0}}>
               <button onClick={runAnalysis}
                 style={{width:'100%',padding:'14px',background:'#4e8c35',color:'#fff',border:'none',borderRadius:8,fontWeight:700,fontSize:16,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",letterSpacing:0.3}}>
@@ -1662,8 +1962,6 @@ export default function ChessEngine(){
           .player-row { width: 100%; max-width: 600px; }
           .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
           .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
-          .chess-piece { display: block; }
-          
           .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
         }
       `}</style>
