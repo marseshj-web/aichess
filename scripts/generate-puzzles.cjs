@@ -90,11 +90,11 @@ rl.on('line', (line) => {
       b.count++;
       // Reservoir sampling: keep a random sample of PER_BAND
       if (b.items.length < PER_BAND) {
-        b.items.push({ id, rating, themes });
+        b.items.push({ id, rating, themes, hook: moves[0] });
       } else {
         const j = Math.floor(Math.random() * b.count);
         if (j < PER_BAND) {
-          b.items[j] = { id, rating, themes };
+          b.items[j] = { id, rating, themes, hook: moves[0] };
         }
       }
       break;

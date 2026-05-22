@@ -469,6 +469,8 @@ export default function ChessEngine(){
   const[puzzleStatus,setPuzzleStatus]=useState('idle');
   const[puzzleMoveIdx,setPuzzleMoveIdx]=useState(0);
   const[puzzleSolvedEval,setPuzzleSolvedEval]=useState(null);
+  const[puzzleAnalysisMode,setPuzzleAnalysisMode]=useState(false);
+  const[evalGraphHover,setEvalGraphHover]=useState(null);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -807,16 +809,25 @@ export default function ChessEngine(){
     // Lichess convention: solution[0] is the SOLVER's first move.
     // The player's color matches the FEN turn (whoever is to move).
     const playerCol=pt;
+    // Parse hook move from puzzle-ids.json entry (CSV-generated, may be absent)
+    const hookLast=(()=>{
+      const h=pick.hook;
+      if(!h||h.length<4)return null;
+      const fc='abcdefgh'.indexOf(h[0]),fr=8-parseInt(h[1]);
+      const tc='abcdefgh'.indexOf(h[2]),tr=8-parseInt(h[3]);
+      if(fc<0||tc<0||isNaN(fr)||isNaN(tr))return null;
+      return{f:fr*8+fc,t:tr*8+tc};
+    })();
     setBoard(pb);setTurn(pt);setCas(pc_);setEp(pe);setSel(null);setLm([]);
-    setOver(null);setThinking(false);setLast(null);setCapW([]);setCapB([]);setHist([]);
+    setOver(null);setThinking(false);setLast(hookLast);setCapW([]);setCapB([]);setHist([]);
     setPromo(null);setPc(playerCol);setEvalScore(null);setSearchInfo('');
-    setHistStates([{board:pb,turn:pt,ep:pe,cas:pc_,last:null,capW:[],capB:[]}]);
+    setHistStates([{board:pb,turn:pt,ep:pe,cas:pc_,last:hookLast,capW:[],capB:[]}]);
     setViewIdx(null);setHintMove(null);setHintThinking(false);
     setPvExploreIdx(null);setPvExploreStates(null);
     analysisAbortRef.current=true;
     setAnalysisEvals([]);setMoveClassifications([]);setBestMoves([]);
     setAnalyzing(false);setAnalysisProgress({current:0,total:0});
-    setReviewMode(false);setOpeningInfo(null);
+    setReviewMode(false);setOpeningInfo(null);setPuzzleAnalysisMode(false);
     setPMI(0);
     setPuzzleData(pz);
     setPuzzleSolvedEval(null);
@@ -868,6 +879,24 @@ export default function ChessEngine(){
     },500);
     return()=>clearTimeout(timer);
   },[puzzleMode,puzzleData,puzzleStatus,board,turn,applyMv,setPMI]);
+
+  // Live eval bar update during puzzle play — triggered on each move
+  useEffect(()=>{
+    if(!puzzleMode||puzzleStatus!=='playing')return;
+    if(!sfReadyRef.current||!sfWorkerRef.current)return;
+    const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
+    sfHintModeRef.current=false;
+    sfCallbackRef.current=null;
+    sfLiveEvalRef.current=true;
+    sfAiSideRef.current=t;
+    sfWorkerRef.current.postMessage('stop');
+    sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
+    sfWorkerRef.current.postMessage('go movetime 500');
+    return()=>{
+      sfLiveEvalRef.current=false;
+      sfWorkerRef.current?.postMessage('stop');
+    };
+  },[puzzleMode,puzzleStatus,puzzleMoveIdx]);
 
   const click=useCallback((idx)=>{
     if(viewIdx!==null||pvExploreIdx!==null||turn!==pc||over||thinking)return;
@@ -1076,6 +1105,77 @@ export default function ChessEngine(){
     
   },[thinking,reset]);
 
+  const runPuzzleAnalysis=useCallback(()=>{
+    if(analyzing||histStates.length<2)return;
+    analysisAbortRef.current=false;
+    setAnalyzing(true);
+    const total=histStates.length;
+    setAnalysisProgress({current:0,total});
+    const evals=new Array(total).fill(null);
+    const bestMovesArr=new Array(total).fill(null);
+    let idx=0;
+    sfLiveEvalRef.current=false;
+    if(sfReadyRef.current&&sfWorkerRef.current){
+      sfWorkerRef.current.postMessage('stop');
+      sfWorkerRef.current.postMessage('ucinewgame');
+    }
+    const next=()=>{
+      if(analysisAbortRef.current){setAnalyzing(false);return;}
+      if(idx>=total){
+        const cls=[];
+        for(let i=0;i<total-1;i++){
+          const t=histStates[i].turn;
+          const ei=evals[i]??0,ei1=evals[i+1]??0;
+          const playerEval=t==='w'?ei:-ei;
+          let rawLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
+          const bm=bestMovesArr[i],played=histStates[i+1]?.last;
+          if(bm&&played&&bm.f===played.f&&bm.t===played.t)rawLoss=0;
+          let cpLoss=rawLoss;
+          if(playerEval<-500)cpLoss=Math.min(cpLoss,100);
+          else if(playerEval<-200)cpLoss=Math.min(cpLoss,200);
+          cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
+        }
+        setAnalysisEvals([...evals]);setMoveClassifications(cls);setBestMoves([...bestMovesArr]);
+        setAnalyzing(false);setPuzzleAnalysisMode(true);setViewIdx(0);
+        return;
+      }
+      const s=histStates[idx];
+      setAnalysisProgress({current:idx+1,total});
+      if(sfReadyRef.current&&sfWorkerRef.current){
+        sfEvalRef.current=null;
+        let watchdog=null;
+        const doNext=(uciMove,sfEval)=>{
+          if(watchdog){clearTimeout(watchdog);watchdog=null;}
+          if(analysisAbortRef.current){setAnalyzing(false);return;}
+          if(uciMove&&uciMove!=='(none)'&&uciMove.length>=4){
+            const fc='abcdefgh'.indexOf(uciMove[0]),fr=8-parseInt(uciMove[1]);
+            const tc='abcdefgh'.indexOf(uciMove[2]),tr=8-parseInt(uciMove[3]);
+            if(fc>=0&&tc>=0){
+              const pv=sfPVRef.current?parsePV(sfPVRef.current,s.board,s.turn,s.ep):[];
+              bestMovesArr[idx]={f:fr*8+fc,t:tr*8+tc,pv};
+            }
+          }
+          evals[idx]=sfEval!=null?(s.turn==='w'?sfEval:-sfEval):0;
+          idx++;
+          setTimeout(next,30);
+        };
+        sfCallbackRef.current=doNext;
+        watchdog=setTimeout(()=>{
+          if(sfCallbackRef.current===doNext){sfCallbackRef.current=null;doNext(null,sfEvalRef.current);}
+        },ANALYSIS_TIMEOUT_MS);
+        sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+        sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
+        sfWorkerRef.current.postMessage(`go depth ${ANALYSIS_DEPTH}`);
+      }else{
+        const r=findBestMove(s.board,s.ep,s.cas,s.turn,4,800,0);
+        evals[idx]=r?(s.turn==='w'?r.eval:-r.eval):0;
+        idx++;
+        setTimeout(next,0);
+      }
+    };
+    next();
+  },[analyzing,histStates]);
+
   const runAnalysis=useCallback(()=>{
     if(analyzing||histStates.length<2)return;
     analysisAbortRef.current=false;
@@ -1117,12 +1217,17 @@ export default function ChessEngine(){
           for(let i=0;i<total-1;i++){
             const t=histStates[i].turn;
             const ei=evals[i]??0,ei1=evals[i+1]??0;
+            const playerEval=t==='w'?ei:-ei;
             let rawLoss=t==='w'?Math.max(0,ei-ei1):Math.max(0,ei1-ei);
             // 실제로 둔 수가 최선의 수와 같으면 독립 분석 불일치 무관하게 손실 0
             const bm=bestMovesArr[i];
             const played=histStates[i+1]?.last;
             if(bm&&played&&bm.f===played.f&&bm.t===played.t)rawLoss=0;
-            const cpLoss=bookHits[i]?0:rawLoss;
+            // 이미 크게 지고 있으면 cpLoss 상한 적용 — 패배 확정 국면의 블런더 과잉 처벌 방지
+            let cpLoss=rawLoss;
+            if(playerEval<-500)cpLoss=Math.min(cpLoss,100);
+            else if(playerEval<-200)cpLoss=Math.min(cpLoss,200);
+            cpLoss=bookHits[i]?0:cpLoss;
             cls.push({cpLoss,player:t,grade:classifyMove(cpLoss)});
           }
           setAnalysisEvals([...evals]);setMoveClassifications(cls);setBestMoves([...bestMovesArr]);
@@ -1200,10 +1305,15 @@ export default function ChessEngine(){
           </filter>
         </defs>
 
-        {/* Subtle grid lines */}
+        {/* Advantage zones */}
+        <rect x={0} y={0} width={W} height={H/2} fill="rgba(255,255,255,0.05)"/>
+        <rect x={0} y={H/2} width={W} height={H/2} fill="rgba(0,0,0,0.18)"/>
+        {/* Grid lines */}
         <line x1={0} y1={H/4} x2={W} y2={H/4} stroke="rgba(255,255,255,0.03)" strokeWidth={1}/>
-        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(255,255,255,0.15)" strokeWidth={1} strokeDasharray="4,4"/>
+        <line x1={0} y1={H/2} x2={W} y2={H/2} stroke="rgba(255,255,255,0.25)" strokeWidth={1} strokeDasharray="4,4"/>
         <line x1={0} y1={(H/4)*3} x2={W} y2={(H/4)*3} stroke="rgba(255,255,255,0.03)" strokeWidth={1}/>
+        <line x1={0} y1={yS(300)} x2={W} y2={yS(300)} stroke="rgba(255,255,255,0.07)" strokeWidth={1}/>
+        <line x1={0} y1={yS(-300)} x2={W} y2={yS(-300)} stroke="rgba(255,255,255,0.07)" strokeWidth={1}/>
 
         {/* Graph Area Fill */}
         <path d={fillArea} fill="url(#glowFill)" />
@@ -1225,7 +1335,13 @@ export default function ChessEngine(){
           const isCurrent=effectiveIdx===i+1;
           const col=GCOL[mc.grade]||'#888';
           return(
-            <g key={i} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}>
+            <g key={i} style={{cursor:'pointer'}} onClick={()=>setViewIdx(i+1)}
+              onMouseEnter={e=>{
+                const mv=histStates[i+1]?.last;
+                const label=mv?`${FL[mv.f&7]}${RL[mv.f>>3]}→${FL[mv.t&7]}${RL[mv.t>>3]}`:'?';
+                setEvalGraphHover({clientX:e.clientX,clientY:e.clientY,label:`${i+1}. ${label}`,cls:mc.grade,evalVal:analysisEvals[i+1]});
+              }}
+              onMouseLeave={()=>setEvalGraphHover(null)}>
               {isCurrent&&<circle cx={x} cy={y} r={12} fill={col} opacity={0.2} filter="url(#glow)"/>}
               <circle cx={x} cy={y} r={isCurrent?5.5:3.5} fill={isCurrent?col:'#222'} stroke={col} strokeWidth={isCurrent?2:1.5}/>
             </g>
@@ -1248,8 +1364,8 @@ export default function ChessEngine(){
 
   // Navigation
   const effectiveIdx=viewIdx!==null?viewIdx:histStates.length-1;
-  const canBack=effectiveIdx>0&&!puzzleMode;
-  const canFwd=effectiveIdx<histStates.length-1&&!puzzleMode;
+  const canBack=effectiveIdx>0&&(puzzleStatus==='solved'||!puzzleMode);
+  const canFwd=effectiveIdx<histStates.length-1&&(puzzleStatus==='solved'||!puzzleMode);
   const isLive=viewIdx===null;
   const goBack=()=>setViewIdx(effectiveIdx-1);
   const goFwd=()=>{const next=effectiveIdx+1;if(next>=histStates.length-1)setViewIdx(null);else setViewIdx(next);};
@@ -1479,7 +1595,7 @@ export default function ChessEngine(){
           <div style={{padding:'14px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',flexShrink:0}}>
             {/* Status */}
             <div style={{display:'flex',alignItems:'center',justifyContent:'center',minHeight:34,marginBottom:12}}>
-              {over?(
+              {over&&!puzzleMode?(
                 <div style={{display:'flex',alignItems:'center',gap:10,background:'rgba(232,213,181,0.1)',border:'1px solid rgba(232,213,181,0.3)',borderRadius:8,padding:'8px 16px',boxShadow:'0 0 15px rgba(232,213,181,0.1)'}}>
                   <span style={{color:'#e8d5b5',fontWeight:700,fontFamily:"'Space Mono',monospace",fontSize:15}}>{over}</span>
                   <button onClick={()=>reset()} style={{padding:'6px 14px',background:'#e8d5b5',color:'#111',border:'none',borderRadius:6,fontWeight:800,fontSize:13,cursor:'pointer',boxShadow:'0 2px 8px rgba(0,0,0,0.3)'}}>Play Again</button>
@@ -1617,84 +1733,198 @@ export default function ChessEngine(){
                         <span key={t} style={{fontSize:11,color:'#89d4f0',background:'rgba(137,212,240,0.1)',border:'1px solid rgba(137,212,240,0.25)',borderRadius:4,padding:'2px 6px',fontWeight:600}}>{t}</span>
                       ))}
                     </div>
-                    {/* Status */}
-                    <div style={{fontSize:14,fontWeight:700,marginBottom:14,padding:'10px 14px',borderRadius:8,
-                      background:puzzleStatus==='solved'?'rgba(126,207,126,0.12)':puzzleStatus==='fail'?'rgba(224,80,80,0.12)':'rgba(255,255,255,0.04)',
-                      border:`1px solid ${puzzleStatus==='solved'?'rgba(126,207,126,0.35)':puzzleStatus==='fail'?'rgba(224,80,80,0.35)':'rgba(255,255,255,0.08)'}`,
-                      color:puzzleStatus==='solved'?'#7ecf7e':puzzleStatus==='fail'?'#e05050':'#e8e0d5',
-                      transition:'all 0.3s'}}>
-                      <div>{puzzleStatus==='solved'?'✓ 정답!':
-                       puzzleStatus==='fail'?'✗ 틀렸습니다 — 다시 시도':
-                       puzzleMoveIdx%2===1?'⏳ 상대 수 분석 중...':'최선의 수를 찾으세요!'}</div>
-                      {puzzleStatus==='solved'&&(()=>{
-                        if(puzzleSolvedEval===null)return(<div style={{fontSize:11,fontWeight:500,color:'#7ecf7e99',marginTop:6,fontFamily:"'Space Mono',monospace"}}>최종 평가 분석 중…</div>);
-                        const abs=Math.abs(puzzleSolvedEval);
-                        const isMate=abs>=90000;
-                        const sign=puzzleSolvedEval>=0?'+':'';
-                        const display=isMate?(puzzleSolvedEval>0?'+M':'-M'):(sign+(puzzleSolvedEval/100).toFixed(1));
-                        const verdict=isMate?(puzzleSolvedEval>0?'외통수!':'상대 외통수'):
-                                       puzzleSolvedEval>=300?'크게 유리':
-                                       puzzleSolvedEval>=150?'유리':
-                                       puzzleSolvedEval>=50?'약간 유리':
-                                       puzzleSolvedEval>=-50?'호각':
-                                       puzzleSolvedEval>=-150?'약간 불리':'불리';
-                        const color=puzzleSolvedEval>=150?'#7ecf7e':puzzleSolvedEval>=-50?'#e8d090':'#e0a070';
-                        return(
-                          <div style={{fontSize:12,fontWeight:600,marginTop:8,fontFamily:"'Space Mono',monospace",color}}>
-                            최종 평가 <span style={{fontWeight:800}}>{display}</span> — {verdict}
+                    {puzzleAnalysisMode?(
+                      /* ── Puzzle Analysis Panel ── */
+                      <>
+                        {/* Eval graph */}
+                        <div style={{marginBottom:12,borderRadius:7,overflow:'hidden',border:'1px solid rgba(255,255,255,0.12)'}}>
+                          {renderEvalGraph()}
+                        </div>
+                        {/* Move list */}
+                        <div style={{marginBottom:12,maxHeight:200,overflowY:'auto'}}>
+                          {histStates.slice(1).map((s,i)=>{
+                            const mv=s.last;
+                            if(!mv)return null;
+                            const mover=histStates[i].turn;
+                            const isPlayer=mover===pc;
+                            const grade=moveClassifications[i];
+                            const gi=grade?GRADE_INFO[grade.grade]:null;
+                            const isActive=viewIdx===i+1;
+                            const notation=`${FL[mv.f&7]}${RL[mv.f>>3]}→${FL[mv.t&7]}${RL[mv.t>>3]}`;
+                            return(
+                              <div key={i} onClick={()=>setViewIdx(i+1)}
+                                style={{display:'flex',alignItems:'center',gap:6,padding:'5px 8px',borderRadius:5,marginBottom:2,
+                                  cursor:'pointer',
+                                  background:isActive?'rgba(255,255,255,0.10)':'rgba(255,255,255,0.03)',
+                                  border:`1px solid ${isActive?'rgba(255,255,255,0.22)':'transparent'}`,
+                                  transition:'background 0.15s'}}>
+                                <span style={{fontSize:11,color:'#555',minWidth:18,fontFamily:"'Space Mono',monospace"}}>{i+1}</span>
+                                <span style={{fontSize:12,color:isPlayer?'#e8e0d5':'#8a8580',fontFamily:"'Space Mono',monospace",flex:1}}>{notation}</span>
+                                <span style={{fontSize:11,color:'#666'}}>{isPlayer?`${pc==='w'?'♔':'♚'} 당신`:`${pc==='w'?'♚':'♔'} 상대`}</span>
+                                {isPlayer&&gi&&(
+                                  <span style={{fontSize:11,fontWeight:700,color:gi.color,padding:'1px 5px',borderRadius:3,background:`${gi.color}18`,border:`1px solid ${gi.color}44`}}>
+                                    {gi.sym} {gi.label}
+                                  </span>
+                                )}
+                              </div>
+                            );
+                          })}
+                        </div>
+                        {/* 결정적 순간 — worst player move */}
+                        {(()=>{
+                          const myMoves=moveClassifications.map((m,i)=>({...m,idx:i})).filter(m=>m.player===pc);
+                          const worst=myMoves.length?[...myMoves].sort((a,b)=>b.cpLoss-a.cpLoss)[0]:null;
+                          if(!worst||worst.cpLoss<150)return null;
+                          const bm=bestMoves[worst.idx];
+                          const gi=GRADE_INFO[worst.grade];
+                          return(
+                            <div style={{marginBottom:10,padding:'8px 12px',borderRadius:7,background:`${gi.color}15`,border:`1px solid ${gi.color}44`,display:'flex',alignItems:'center',gap:8,flexWrap:'wrap'}}>
+                              <span style={{fontSize:14}}>{gi.sym}</span>
+                              <span style={{fontSize:12,fontWeight:700,color:gi.color}}>결정적 순간: {worst.idx+1}번째 수</span>
+                              {bm&&<span style={{fontSize:11,color:'#89d4f0',fontFamily:"'Space Mono',monospace"}}>최선 {FL[bm.f&7]}{RL[bm.f>>3]}→{FL[bm.t&7]}{RL[bm.t>>3]}</span>}
+                              <button onClick={()=>setViewIdx(worst.idx+1)} style={{marginLeft:'auto',padding:'3px 8px',background:'rgba(255,255,255,0.08)',color:'#e8e0d5',border:'1px solid rgba(255,255,255,0.15)',borderRadius:5,fontSize:11,cursor:'pointer',fontWeight:700}}>이 수 보기</button>
+                            </div>
+                          );
+                        })()}
+                        {/* Current position insight */}
+                        {viewIdx!==null&&viewIdx>0&&(()=>{
+                          const cls=moveClassifications[viewIdx-1];
+                          const bm=bestMoves[viewIdx-1];
+                          const mover=histStates[viewIdx-1]?.turn;
+                          const isPlayer=mover===pc;
+                          if(!cls)return null;
+                          const gi=GRADE_INFO[cls.grade];
+                          const bmNotation=bm?`${FL[bm.f&7]}${RL[bm.f>>3]}→${FL[bm.t&7]}${RL[bm.t>>3]}`:null;
+                          const playedMv=histStates[viewIdx]?.last;
+                          const playedNotation=playedMv?`${FL[playedMv.f&7]}${RL[playedMv.f>>3]}→${FL[playedMv.t&7]}${RL[playedMv.t>>3]}`:'';
+                          return(
+                            <div style={{marginBottom:10,padding:'9px 12px',borderRadius:7,background:'rgba(255,255,255,0.05)',border:'1px solid rgba(255,255,255,0.10)'}}>
+                              {isPlayer?(
+                                <>
+                                  <div style={{fontSize:12,fontWeight:700,color:gi.color,marginBottom:4}}>
+                                    {gi.sym} {gi.label} — 당신의 수: {playedNotation}
+                                  </div>
+                                  {bm&&cls.grade!=='best'&&(
+                                    <div style={{fontSize:11,color:'#8a8580'}}>
+                                      최선: <span style={{color:'#89d4f0',fontFamily:"'Space Mono',monospace"}}>{bmNotation}</span>
+                                      {cls.cpLoss>0&&<span style={{color:'#888'}}> ({cls.cpLoss>0?'-':''}{(cls.cpLoss/100).toFixed(1)}점 손실)</span>}
+                                    </div>
+                                  )}
+                                  {bm&&bm.pv&&bm.pv.length>0&&(
+                                    <div style={{fontSize:11,color:'#555',marginTop:3}}>
+                                      예상: {bm.pv.slice(0,4).map(m=>`${FL[m.f&7]}${RL[m.f>>3]}${FL[m.t&7]}${RL[m.t>>3]}`).join(' ')}
+                                    </div>
+                                  )}
+                                </>
+                              ):(
+                                <div style={{fontSize:12,color:'#8a8580'}}>
+                                  🤖 상대 강제 응수: <span style={{color:'#e8e0d5',fontFamily:"'Space Mono',monospace"}}>{playedNotation}</span>
+                                </div>
+                              )}
+                            </div>
+                          );
+                        })()}
+                        {/* Analysis buttons */}
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap'}}>
+                          <button onClick={()=>{setPuzzleAnalysisMode(false);setViewIdx(null);}}
+                            style={{padding:'7px 12px',background:'rgba(255,255,255,0.06)',color:'#b0a898',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontSize:12,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                            ✕ 분석 종료
+                          </button>
+                          <button onClick={enterPuzzleMode}
+                            style={{padding:'7px 12px',background:'rgba(137,212,240,0.15)',color:'#89d4f0',border:'1px solid rgba(137,212,240,0.4)',borderRadius:7,fontSize:12,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                            다음 퍼즐 →
+                          </button>
+                        </div>
+                      </>
+                    ):(
+                      /* ── Normal puzzle play UI ── */
+                      <>
+                        {/* Status */}
+                        <div style={{fontSize:14,fontWeight:700,marginBottom:14,padding:'10px 14px',borderRadius:8,
+                          background:puzzleStatus==='solved'?'rgba(126,207,126,0.12)':puzzleStatus==='fail'?'rgba(224,80,80,0.12)':'rgba(255,255,255,0.04)',
+                          border:`1px solid ${puzzleStatus==='solved'?'rgba(126,207,126,0.35)':puzzleStatus==='fail'?'rgba(224,80,80,0.35)':'rgba(255,255,255,0.08)'}`,
+                          color:puzzleStatus==='solved'?'#7ecf7e':puzzleStatus==='fail'?'#e05050':'#e8e0d5',
+                          transition:'all 0.3s'}}>
+                          <div>{puzzleStatus==='solved'?'✓ 정답!':
+                           puzzleStatus==='fail'?'✗ 틀렸습니다 — 다시 시도':
+                           puzzleMoveIdx%2===1?'⏳ 상대 수 분석 중...':'최선의 수를 찾으세요!'}</div>
+                          {puzzleStatus==='solved'&&(()=>{
+                            if(puzzleSolvedEval===null)return(<div style={{fontSize:11,fontWeight:500,color:'#7ecf7e99',marginTop:6,fontFamily:"'Space Mono',monospace"}}>최종 평가 분석 중…</div>);
+                            const abs=Math.abs(puzzleSolvedEval);
+                            const isMate=abs>=90000;
+                            const sign=puzzleSolvedEval>=0?'+':'';
+                            const display=isMate?(puzzleSolvedEval>0?'+M':'-M'):(sign+(puzzleSolvedEval/100).toFixed(1));
+                            const verdict=isMate?(puzzleSolvedEval>0?'외통수!':'상대 외통수'):
+                                           puzzleSolvedEval>=300?'크게 유리':
+                                           puzzleSolvedEval>=150?'유리':
+                                           puzzleSolvedEval>=50?'약간 유리':
+                                           puzzleSolvedEval>=-50?'호각':
+                                           puzzleSolvedEval>=-150?'약간 불리':'불리';
+                            const color=puzzleSolvedEval>=150?'#7ecf7e':puzzleSolvedEval>=-50?'#e8d090':'#e0a070';
+                            return(
+                              <div style={{fontSize:12,fontWeight:600,marginTop:8,fontFamily:"'Space Mono',monospace",color}}>
+                                최종 평가 <span style={{fontWeight:800}}>{display}</span> — {verdict}
+                              </div>
+                            );
+                          })()}
+                        </div>
+                        {/* Progress dots — one per player move (even indices) */}
+                        {puzzleData.moves.length>1&&(
+                          <div style={{display:'flex',gap:6,marginBottom:18,alignItems:'center'}}>
+                            <span style={{fontSize:11,color:'#666',marginRight:4}}>진행</span>
+                            {puzzleData.moves.filter((_,i)=>i%2===0).map((_,i)=>(
+                              <div key={i} style={{width:12,height:12,borderRadius:'50%',
+                                background:puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.35)':'rgba(255,255,255,0.1)',
+                                border:`1.5px solid ${puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.6)':'rgba(255,255,255,0.2)'}`,
+                                transition:'all 0.3s'}}/>
+                            ))}
                           </div>
-                        );
-                      })()}
-                    </div>
-                    {/* Progress dots — one per player move (even indices) */}
-                    {puzzleData.moves.length>1&&(
-                      <div style={{display:'flex',gap:6,marginBottom:18,alignItems:'center'}}>
-                        <span style={{fontSize:11,color:'#666',marginRight:4}}>진행</span>
-                        {puzzleData.moves.filter((_,i)=>i%2===0).map((_,i)=>(
-                          <div key={i} style={{width:12,height:12,borderRadius:'50%',
-                            background:puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.35)':'rgba(255,255,255,0.1)',
-                            border:`1.5px solid ${puzzleMoveIdx>i*2?'#7ecf7e':puzzleMoveIdx===i*2?'rgba(255,255,255,0.6)':'rgba(255,255,255,0.2)'}`,
-                            transition:'all 0.3s'}}/>
-                        ))}
-                      </div>
+                        )}
+                        {/* Buttons */}
+                        <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
+                          {puzzleStatus==='playing'&&(
+                            <button onClick={()=>{
+                              if(puzzleMoveIdxRef.current%2===1)return;
+                              const m=uciToMove(puzzleData.moves[puzzleMoveIdxRef.current],board,turn,ep);
+                              if(m)setHintMove({f:m.f,t:m.t,pv:[]});
+                            }} style={{padding:'8px 14px',background:'rgba(60,220,130,0.12)',color:'#3cdc82',border:'1px solid rgba(60,220,130,0.35)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                              💡 힌트
+                            </button>
+                          )}
+                          {puzzleStatus==='playing'&&(
+                            <button onClick={()=>{
+                              setPuzzleStatus('solved');
+                              let idx=puzzleMoveIdxRef.current;
+                              const playNext=()=>{
+                                if(idx>=puzzleData.moves.length)return;
+                                const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
+                                const m=uciToMove(puzzleData.moves[idx],b,t,e);
+                                if(m)applyMv(b,m,e,c,t);
+                                setPMI(++idx);
+                                if(idx<puzzleData.moves.length)setTimeout(playNext,600);
+                              };
+                              setTimeout(playNext,100);
+                            }} style={{padding:'8px 14px',background:'rgba(255,255,255,0.06)',color:'#b0a898',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                              👁 해답 보기
+                            </button>
+                          )}
+                          {puzzleStatus==='solved'&&(
+                            <button onClick={runPuzzleAnalysis} disabled={analyzing}
+                              style={{padding:'8px 14px',background:analyzing?'rgba(160,130,220,0.06)':'rgba(160,130,220,0.15)',color:analyzing?'#7a6aaa':'#c0a0f0',border:`1px solid ${analyzing?'rgba(160,130,220,0.2)':'rgba(160,130,220,0.45)'}`,borderRadius:7,fontSize:13,cursor:analyzing?'default':'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                              {analyzing?`⏳ 분석 중 ${analysisProgress.current}/${analysisProgress.total}`:'📊 수 분석'}
+                            </button>
+                          )}
+                          <button onClick={enterPuzzleMode}
+                            style={{padding:'8px 14px',background:'rgba(137,212,240,0.15)',color:'#89d4f0',border:'1px solid rgba(137,212,240,0.4)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
+                            다음 퍼즐 →
+                          </button>
+                        </div>
+                        {/* ELO info */}
+                        <div style={{fontSize:11,color:'#444',fontFamily:"'Space Mono',monospace",lineHeight:1.6}}>
+                          ELO {elo} → 퍼즐 {Math.min(3000,elo+600)-200}~{Math.min(3000,elo+600)+200}
+                        </div>
+                      </>
                     )}
-                    {/* Buttons */}
-                    <div style={{display:'flex',gap:8,flexWrap:'wrap',marginBottom:16}}>
-                      {puzzleStatus==='playing'&&(
-                        <button onClick={()=>{
-                          if(puzzleMoveIdxRef.current%2===1)return;
-                          const m=uciToMove(puzzleData.moves[puzzleMoveIdxRef.current],board,turn,ep);
-                          if(m)setHintMove({f:m.f,t:m.t,pv:[]});
-                        }} style={{padding:'8px 14px',background:'rgba(60,220,130,0.12)',color:'#3cdc82',border:'1px solid rgba(60,220,130,0.35)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
-                          💡 힌트
-                        </button>
-                      )}
-                      {puzzleStatus==='playing'&&(
-                        <button onClick={()=>{
-                          setPuzzleStatus('solved');
-                          let idx=puzzleMoveIdxRef.current;
-                          const playNext=()=>{
-                            if(idx>=puzzleData.moves.length)return;
-                            const b=bR.current,e=eR.current,c=cR.current,t=tR.current;
-                            const m=uciToMove(puzzleData.moves[idx],b,t,e);
-                            if(m)applyMv(b,m,e,c,t);
-                            setPMI(++idx);
-                            if(idx<puzzleData.moves.length)setTimeout(playNext,600);
-                          };
-                          setTimeout(playNext,100);
-                        }} style={{padding:'8px 14px',background:'rgba(255,255,255,0.06)',color:'#b0a898',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
-                          👁 해답 보기
-                        </button>
-                      )}
-                      <button onClick={enterPuzzleMode}
-                        style={{padding:'8px 14px',background:'rgba(137,212,240,0.15)',color:'#89d4f0',border:'1px solid rgba(137,212,240,0.4)',borderRadius:7,fontSize:13,cursor:'pointer',fontWeight:700,fontFamily:"'DM Sans',sans-serif"}}>
-                        다음 퍼즐 →
-                      </button>
-                    </div>
-                    {/* ELO info */}
-                    <div style={{fontSize:11,color:'#444',fontFamily:"'Space Mono',monospace",lineHeight:1.6}}>
-                      ELO {elo} → 퍼즐 {Math.min(3000,elo+600)-200}~{Math.min(3000,elo+600)+200}
-                    </div>
                   </>
                 )}
               </div>
@@ -1749,7 +1979,7 @@ export default function ChessEngine(){
                   if (!myMoves.length) return null;
                   
                   const acc = parseFloat(calcAccuracy(myMoves));
-                  const estimatedElo = Math.min(2800, Math.max(400, Math.round(acc * 35 - 900)));
+                  const estimatedElo = Math.min(2800, Math.max(400, Math.round(3000/(1+Math.exp(-0.09*(acc-72))))));
                   
                   const opening = myMoves.filter(m => Math.floor(m.idx / 2) < 15);
                   const middle = myMoves.filter(m => Math.floor(m.idx / 2) >= 15 && Math.floor(m.idx / 2) < 30);
@@ -1927,6 +2157,26 @@ export default function ChessEngine(){
         </div>
 
       </div>
+
+      {/* Eval graph hover tooltip */}
+      {evalGraphHover&&(
+        <div style={{position:'fixed',left:evalGraphHover.clientX+14,top:evalGraphHover.clientY-44,
+          background:'#1e1c1a',border:'1px solid rgba(255,255,255,0.2)',borderRadius:7,
+          padding:'5px 10px',fontSize:12,color:'#e8e0d5',pointerEvents:'none',zIndex:9999,
+          boxShadow:'0 4px 16px rgba(0,0,0,0.7)',display:'flex',alignItems:'center',gap:8,whiteSpace:'nowrap'}}>
+          <span style={{fontFamily:"'Space Mono',monospace",fontWeight:700}}>{evalGraphHover.label}</span>
+          {evalGraphHover.evalVal!=null&&(
+            <span style={{color:evalGraphHover.evalVal>=0?'#89d4f0':'#e05050',fontFamily:"'Space Mono',monospace"}}>
+              {evalGraphHover.evalVal>=0?'+':''}{(evalGraphHover.evalVal/100).toFixed(2)}
+            </span>
+          )}
+          {evalGraphHover.cls&&(
+            <span style={{color:GRADE_INFO[evalGraphHover.cls]?.color,fontWeight:700}}>
+              {GRADE_INFO[evalGraphHover.cls]?.sym} {GRADE_INFO[evalGraphHover.cls]?.label}
+            </span>
+          )}
+        </div>
+      )}
 
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
