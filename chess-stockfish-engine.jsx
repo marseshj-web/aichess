@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useRef } from "react";
+import { useState, useCallback, useEffect, useRef, useMemo } from "react";
 
 // ═══════════════════════════════════════════════════
 // TUNING CONSTANTS
@@ -92,6 +92,53 @@ function doMv(bd,m){const nb=[...bd];nb[m.t]=m.pr||nb[m.f];nb[m.f]=E;
 }
 function inChk(bd,col){const k=bd.indexOf(col==='w'?WK:BK);return k<0||sqAtt(bd,k,col==='w'?'b':'w')}
 function legal(bd,col,ep,cas){return genMoves(bd,col,ep,cas).filter(m=>!inChk(doMv(bd,m),col))}
+
+// Standard Algebraic Notation for a played move.
+// before/after: board arrays before & after the move. m:{f,t}. ep/cas: state BEFORE the move.
+const SAN_L=['','N','B','R','Q','K']; // index = piece type (0=pawn)
+function toSAN(before,after,m,ep,cas){
+  const piece=before[m.f];if(!piece)return'';
+  const col=isW(piece)?'w':'b';
+  const ptype=(piece-1)%6; // 0=P 1=N 2=B 3=R 4=Q 5=K
+  const[fr,fc]=toRC(m.f),[tr,tc]=toRC(m.t);
+  let san;
+  if(ptype===5&&Math.abs(tc-fc)===2){
+    san=tc>fc?'O-O':'O-O-O';
+  }else{
+    const dest=FL[tc]+RL[tr];
+    const isEp=ptype===0&&fc!==tc&&before[m.t]===E;
+    const isCap=before[m.t]!==E||isEp;
+    if(ptype===0){
+      san=isCap?FL[fc]+'x'+dest:dest;
+      const promo=after[m.t]!==E?(after[m.t]-1)%6:0;
+      if(promo!==0)san+='='+SAN_L[promo];
+    }else{
+      // disambiguation against other legal same-type moves to the same square
+      const others=legal(before,col,ep,cas).filter(x=>x.t===m.t&&before[x.f]===piece&&x.f!==m.f);
+      let dis='';
+      if(others.length){
+        const sameFile=others.some(x=>(x.f&7)===fc);
+        const sameRank=others.some(x=>(x.f>>3)===fr);
+        dis=!sameFile?FL[fc]:!sameRank?RL[fr]:FL[fc]+RL[fr];
+      }
+      san=SAN_L[ptype]+dis+(isCap?'x':'')+dest;
+    }
+  }
+  const opp=col==='w'?'b':'w';
+  if(inChk(after,opp)){
+    const epA=ptype===0&&Math.abs(tr-fr)===2?rc((fr+tr)/2,fc):null;
+    san+=legal(after,opp,epA,cas).length?'+':'#';
+  }
+  return san;
+}
+// Resolve a SAN token back to a move object against the given position (used by PGN import).
+function sanToMove(san,bd,col,ep,cas){
+  const want=san.replace(/[+#!?]/g,'');
+  for(const m of legal(bd,col,ep,cas)){
+    if(toSAN(bd,doMv(bd,m),m,ep,cas).replace(/[+#!?]/g,'')===want)return m;
+  }
+  return null;
+}
 function updCas(cas,m,bd){let c=cas;const p=bd[m.f];
   if(p===WK)c=c.replace('K','').replace('Q','');if(p===BK)c=c.replace('k','').replace('q','');
   if(m.f===63||m.t===63)c=c.replace('K','');if(m.f===56||m.t===56)c=c.replace('Q','');
@@ -1038,35 +1085,44 @@ export default function ChessEngine(){
     setOver(pc==='w'?'Black wins!':'White wins!');
   },[over,thinking,pc]);
 
+  // SAN notation for each half-move (sanList[k] ↔ hist[k]); memoized on the move history
+  const sanList=useMemo(()=>{
+    const out=[];
+    for(let i=1;i<histStates.length;i++){
+      const mvo=histStates[i].last;
+      if(!mvo){out.push('');continue;}
+      out.push(toSAN(histStates[i-1].board,histStates[i].board,mvo,histStates[i-1].ep??null,histStates[i-1].cas??'KQkq'));
+    }
+    return out;
+  },[histStates]);
+
   const handleExportPGN=useCallback(()=>{
     if(histStates.length<2)return;
-    const moves=[];
-    for(let i=1;i<histStates.length;i++){
-      const m=histStates[i].last;
-      let uci=FL[m.f&7]+RL[m.f>>3]+FL[m.t&7]+RL[m.t>>3];
-      if(histStates[i].board[m.t]===WQ&&m.t<8&&m.f>=8)uci+='q'; // basic promo handling
-      else if(histStates[i].board[m.t]===BQ&&m.t>=56&&m.f<56)uci+='q';
-      moves.push(uci);
-    }
-    const pgn=moves.reduce((acc,curr,idx)=>{
+    const pgn=sanList.reduce((acc,curr,idx)=>{
       if(idx%2===0)return acc+`${Math.floor(idx/2)+1}. ${curr} `;
       return acc+`${curr} `;
     },'').trim();
-    
+
     navigator.clipboard.writeText(pgn).then(()=>{
-      alert('PGN(UCI 형식)이 클립보드에 복사되었습니다.');
+      alert('PGN(SAN 형식)이 클립보드에 복사되었습니다.');
     }).catch(e=>console.error('PGN export failed:',e));
-  },[histStates]);
+  },[sanList,histStates]);
 
   const handleImportPGN=useCallback(()=>{
     if(thinking)return;
-    const input=prompt('PGN(UCI 형식, 예: 1. e2e4 e7e5) 텍스트를 입력하세요:');
+    const input=prompt('PGN을 붙여넣으세요 (SAN 예: 1. e4 e5 2. Nf3 / UCI 예: 1. e2e4 e7e5):');
     if(!input)return;
-    
-    // Clean string and extract UCI moves
-    const clean=input.replace(/\d+\./g,'').replace(/\s+/g,' ').trim();
-    const tokens=clean.split(' ').filter(t=>t.length>=4&&t.length<=5);
-    
+
+    // Strip comments, variations, NAGs, move numbers and result markers — keep SAN/UCI tokens
+    const clean=input
+      .replace(/\{[^}]*\}/g,' ')
+      .replace(/\([^)]*\)/g,' ')
+      .replace(/\$\d+/g,' ')
+      .replace(/\d+\.(\.\.)?/g,' ')
+      .replace(/\b(1-0|0-1|1\/2-1\/2|\*)\b/g,' ')
+      .replace(/\s+/g,' ').trim();
+    const tokens=clean.split(' ').filter(t=>t.length>0);
+
     if(tokens.length===0){
       alert('유효한 기보를 찾을 수 없습니다.');
       return;
@@ -1090,12 +1146,15 @@ export default function ChessEngine(){
         return;
       }
       
-      const uci=tokens[idx];
-      const m=uciToMove(uci,currentBoard,currentTurn,currentEp);
-      
+      const tok=tokens[idx];
+      // Accept both UCI (e2e4) and SAN (e4, Nf3, O-O, exd5, e8=Q+)
+      const m=/^[a-h][1-8][a-h][1-8][qrbnQRBN]?$/.test(tok)
+        ? uciToMove(tok,currentBoard,currentTurn,currentEp)
+        : sanToMove(tok,currentBoard,currentTurn,currentEp,currentCas);
+
       // Safety check: is it a pseudo-legal move structure?
       if(!m||m.f<0||m.t<0||m.f>63||m.t>63){
-        console.warn('Invalid move in sequence:',uci);
+        console.warn('Invalid move in sequence:',tok);
         return;
       }
 
@@ -1399,6 +1458,31 @@ export default function ChessEngine(){
   const goBack=()=>setViewIdx(effectiveIdx-1);
   const goFwd=()=>{const next=effectiveIdx+1;if(next>=histStates.length-1)setViewIdx(null);else setViewIdx(next);};
   const activeHistIdx=effectiveIdx-1;
+  const moveListRef=useRef(null);
+
+  // Keyboard ← → navigation through the move history (ignored while typing or exploring a PV)
+  useEffect(()=>{
+    const onKey=(e)=>{
+      if(e.target&&/^(INPUT|TEXTAREA|SELECT)$/.test(e.target.tagName))return;
+      if(pvExploreIdx!==null||promo)return;
+      if(e.key==='ArrowLeft'&&canBack){e.preventDefault();setViewIdx(effectiveIdx-1);}
+      else if(e.key==='ArrowRight'&&canFwd){e.preventDefault();const n=effectiveIdx+1;setViewIdx(n>=histStates.length-1?null:n);}
+    };
+    window.addEventListener('keydown',onKey);
+    return()=>window.removeEventListener('keydown',onKey);
+  },[canBack,canFwd,effectiveIdx,histStates.length,pvExploreIdx,promo]);
+
+  // Auto-scroll the move list so the active (or latest) move stays in view.
+  // Scrolls only the list container — never the page — to avoid jumping on mobile.
+  useEffect(()=>{
+    const c=moveListRef.current;if(!c)return;
+    const ply=isLive?sanList.length-1:activeHistIdx;
+    if(ply<0)return;
+    const el=c.querySelector(`[data-ply="${ply}"]`);
+    if(!el)return;
+    const cr=c.getBoundingClientRect(),er=el.getBoundingClientRect();
+    c.scrollTop+=(er.top-cr.top)-(c.clientHeight/2-el.clientHeight/2);
+  },[viewIdx,sanList.length,isLive,activeHistIdx,reviewMode,puzzleMode]);
 
   // Display state (PV explore > historical view > live)
   const pvState=pvExploreIdx!==null&&pvExploreStates?pvExploreStates[pvExploreIdx]:null;
@@ -2064,7 +2148,7 @@ export default function ChessEngine(){
                                     {turnNum}.{isWhite ? ' ' : '...'}
                                   </span>
                                   <span style={{fontSize: 13, color: '#e05050', fontWeight: 700}}>
-                                    {hist[m.idx]}
+                                    {sanList[m.idx]}
                                   </span>
                                   <span style={{fontSize: 12, color: '#b0a898', marginLeft: 'auto'}}>
                                     -{(m.cpLoss / 100).toFixed(1)}점
@@ -2138,19 +2222,19 @@ export default function ChessEngine(){
                         <button onClick={handleExportPGN} style={{background:'rgba(255,255,255,0.06)',border:'1px solid rgba(255,255,255,0.1)',color:'#b0a898',fontSize:10,padding:'3px 6px',borderRadius:4,cursor:'pointer',fontWeight:700}}>📋 내보내기</button>
                       </div>
                     </div>
-                    <div style={{display:'flex',flexDirection:'column',gap:1}}>
-                      {Array.from({length:Math.ceil(hist.length/2)}).map((_,i)=>{
-                        const w=hist[i*2],b=hist[i*2+1];
+                    <div ref={moveListRef} style={{display:'flex',flexDirection:'column',gap:1,maxHeight:320,overflowY:'auto'}}>
+                      {Array.from({length:Math.ceil(sanList.length/2)}).map((_,i)=>{
+                        const w=sanList[i*2],b=sanList[i*2+1];
                         const wMc=moveClassifications[i*2];const bMc=moveClassifications[i*2+1];
                         const wGi=wMc?GRADE_INFO[wMc.grade]:null;const bGi=bMc?GRADE_INFO[bMc.grade]:null;
                         return(
                           <div key={i} style={{display:'grid',gridTemplateColumns:'28px 1fr 1fr',gap:4,padding:'3px 4px',borderRadius:4,background:i%2===0?'transparent':'rgba(255,255,255,0.02)'}}>
                             <span style={{fontSize:12,color:'#555',fontFamily:"'Space Mono',monospace",paddingTop:3}}>{i+1}.</span>
-                            {w&&<span onClick={()=>setViewIdx(i*2+1)}
+                            {w&&<span data-ply={i*2} onClick={()=>setViewIdx(i*2+1)}
                               style={{fontSize:13,color:activeHistIdx===i*2?'#f0c040':'#e8d5b5',cursor:'pointer',fontFamily:"'Space Mono',monospace",display:'flex',alignItems:'center',gap:3,fontWeight:activeHistIdx===i*2?700:400,background:activeHistIdx===i*2?'rgba(240,192,64,0.12)':'transparent',borderRadius:3,padding:'2px 5px'}}>
                               {w}{wGi&&<span style={{fontSize:10,color:wGi.color}}>{wGi.sym}</span>}
                             </span>}
-                            {b&&<span onClick={()=>setViewIdx(i*2+2)}
+                            {b&&<span data-ply={i*2+1} onClick={()=>setViewIdx(i*2+2)}
                               style={{fontSize:13,color:activeHistIdx===i*2+1?'#f0c040':'#8aa8d5',cursor:'pointer',fontFamily:"'Space Mono',monospace",display:'flex',alignItems:'center',gap:3,fontWeight:activeHistIdx===i*2+1?700:400,background:activeHistIdx===i*2+1?'rgba(240,192,64,0.12)':'transparent',borderRadius:3,padding:'2px 5px'}}>
                               {b}{bGi&&<span style={{fontSize:10,color:bGi.color}}>{bGi.sym}</span>}
                             </span>}

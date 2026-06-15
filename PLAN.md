@@ -141,6 +141,23 @@
 
 ---
 
+### 11. 라이브 기보 SAN 표기 + 키보드/자동스크롤 (Tier 2) ✅
+**문제:** 라이브 무브 리스트가 좌표 표기(`♞e7→e5`)였고, 자동 스크롤·키보드 네비게이션이 없었음.
+
+**구현 내용:**
+- **`toSAN()`** 모듈 함수 추가 — 표준 SAN 생성(기물 문자, 캡처 `x`, 폰 캡처 `exd5`, disambiguation 파일/랭크, 캐슬링 `O-O`/`O-O-O`, 승급 `=Q`, 체크 `+`/메이트 `#`). disambiguation은 `legal()` 기반이라 핀된 기물은 자동 제외.
+- **`sanList`** useMemo(`histStates` 의존) — 각 반수의 SAN. `hist[k]`와 인덱스 일치. (TDZ 주의: `handleExportPGN`보다 먼저 선언해야 함)
+- 라이브 "수 기록" 리스트가 `sanList` 렌더 + `maxHeight:320` 내부 스크롤 컨테이너화. 복기 "결정적 분기점"도 SAN.
+- **자동 스크롤**: `moveListRef` 컨테이너만 스크롤(페이지 점프 방지, 모바일 안전). 현재/최신 수를 중앙에.
+- **키보드 ←→**: 입력창/PV탐색/프로모션 중엔 무시. `canBack/canFwd` 게이트.
+- **PGN 내보내기 → SAN**, **불러오기 → UCI/SAN 자동 판별**(`sanToMove()` + 주석/변화수/NAG/수번호/결과마커 strip). 실제 Lichess PGN 무브텍스트도 붙여넣기 가능.
+
+**검증:** `scripts/verify-san.mjs` — Scholar mate(캡처+#), 캐슬링(O-O), 나이트 disambiguation(Nfd4), SAN 불러오기(수번호 포함), 키보드 ←→ 전부 통과.
+
+**수정 위치:** `chess-stockfish-engine.jsx` lines ~95(toSAN/sanToMove), ~1088(sanList), 키보드/자동스크롤 effect(nav 블록), 수 기록 렌더, import/export.
+
+---
+
 ## 알려진 이슈 및 참고 사항 (Known Issues) ⚠️
 
 * **삼성 인터넷 브라우저 호환성 문제**: 삼성 인터넷 모바일 브라우저의 엄격한 보안 설정 및 고유한 CSS 렌더링 엔진(WebkitTextStroke 등) 처리 방식의 차이로 인해, 체스 기물(Piece) 폰트가 정상적으로 렌더링되지 않거나 색상이 뭉개지는 현상이 보고되었습니다. 현재 Chrome, Safari 등 메이저 브라우저에서는 정상 작동하므로 크롬 브라우저 사용을 권장합니다. 추후 폰트 대신 SVG 이미지 에셋으로 교체하여 근본적으로 해결하는 방안을 고려해야 합니다.
