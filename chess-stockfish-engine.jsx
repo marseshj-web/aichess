@@ -6,6 +6,7 @@ import { useState, useCallback, useEffect, useRef } from "react";
 const UCI_ELO_MIN = 1320;        // Stockfish UCI_Elo minimum threshold
 const OPENING_BOOK_PLY = 30;     // Max half-moves to consult opening book
 const HINT_MOVETIME_MS = 3000;   // Stockfish search time for hints
+const LIVE_EVAL_MOVETIME_MS = 600;// Background eval-bar refresh on the player's turn
 const ANALYSIS_DEPTH = 12;       // Stockfish depth for post-game analysis
 const ANALYSIS_TIMEOUT_MS = 8000;// Watchdog timeout per analysis position
 
@@ -681,6 +682,9 @@ export default function ChessEngine(){
     if(sfReadyRef.current&&sfWorkerRef.current){
       let cancelled=false;
       const fen=boardToFEN(b,aiC,e,c);
+      // Halt any lingering background eval search before the AI takes over the worker
+      sfLiveEvalRef.current=false;
+      sfWorkerRef.current.postMessage('stop');
 
       const runEngine=()=>{
         if(cancelled)return;
@@ -716,7 +720,6 @@ export default function ChessEngine(){
           if(cancelled)return;
           if(bookMoves&&bookMoves.length>0){
             const m=uciToMove(bookMoves[0],b,aiC,e);
-            setEvalScore(null);
             setSearchInfo('Opening Book');
             applyMv(b,m,e,c,aiC);
             setThinking(false);
@@ -747,6 +750,30 @@ export default function ChessEngine(){
     },50);
     return()=>clearTimeout(tid);
   },[turn,applyMv,gameKey,puzzleMode]);
+
+  // Live eval bar on the player's own turn — without this the bar only updates
+  // while the AI is thinking, so it lagged a full move behind the player's input.
+  // Mirrors the puzzle-mode live-eval effect; the single worker is shared turn-by-turn.
+  useEffect(()=>{
+    if(puzzleMode||viewIdx!==null||over)return;
+    if(turn!==pc||thinking||hintThinking||hintMove)return;
+    if(!sfReadyRef.current||!sfWorkerRef.current)return;
+    const b=board,e=eR.current,c=cR.current,t=turn;
+    sfHintModeRef.current=false;
+    sfCallbackRef.current=null;
+    sfLiveEvalRef.current=true;
+    sfAiSideRef.current=t;
+    sfWorkerRef.current.postMessage('stop');
+    // Evaluate objectively (full strength) — the AI turn re-sets its own weakened
+    // options before moving, so this only affects the eval-bar read.
+    sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
+    sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+    sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
+    sfWorkerRef.current.postMessage(`go movetime ${LIVE_EVAL_MOVETIME_MS}`);
+    // No 'stop' in cleanup: the next worker owner (AI turn / hint) issues its own
+    // 'stop' before searching, so stopping here would abort a hint that just started.
+    return()=>{sfLiveEvalRef.current=false;};
+  },[board,turn,thinking,hintThinking,hintMove,puzzleMode,viewIdx,over,pc]);
 
   const enterPVExplore=useCallback((originBoard,originTurn,originEp,originCas,originLast,pvMoves)=>{
     const states=[{board:originBoard,turn:originTurn,last:originLast}];
@@ -977,6 +1004,8 @@ export default function ChessEngine(){
         });
         setHintThinking(false);
       };
+      sfLiveEvalRef.current=false;
+      sfWorkerRef.current.postMessage('stop');
       sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
       sfWorkerRef.current.postMessage('setoption name UCI_Elo value 3200');
       sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
@@ -1514,7 +1543,7 @@ export default function ChessEngine(){
           <div style={{display:'flex',alignItems:'stretch',width:'100%',justifyContent:'center'}}>
             {/* Eval bar */}
             <div className="eval-bar" style={{width:42,borderRadius:'5px 0 0 5px',overflow:'hidden',background:flip?'#e8e0d0':'#1a1816',position:'relative',flexShrink:0}}>
-              <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#1a1816':'#e8e0d0',transition:'height 0.6s ease'}}/>
+              <div style={{position:'absolute',bottom:0,left:0,right:0,height:`${flip?100-evalPct:evalPct}%`,background:flip?'#1a1816':'#e8e0d0',transition:'height 0.25s ease'}}/>
               <div style={{position:'absolute',top:'50%',left:'50%',transform:'translate(-50%,-50%) rotate(-90deg)',fontSize:12,fontWeight:700,color:'#e8e0d5',whiteSpace:'nowrap',fontFamily:"'Space Mono',monospace",textShadow:'0 0 6px #000,0 0 12px #000'}}>{evalText}</div>
             </div>
 
@@ -1563,7 +1592,7 @@ export default function ChessEngine(){
           </div>
 
           {/* Player row */}
-          <div style={{width:'min(calc(100vh - 142px), calc(100vw - 438px), 742px)',marginTop:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
+          <div className="player-row" style={{marginTop:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
             <div style={{display:'flex',alignItems:'center',gap:10}}>
               {renderKingAvatar(pc,46)}
               <div>
@@ -1576,7 +1605,7 @@ export default function ChessEngine(){
         </div>
 
         {/* ── Right panel ── */}
-        <div style={{width:400,background:'#111',borderLeft:'1px solid rgba(255,255,255,0.05)',display:'flex',flexDirection:'column',overflow:'hidden',flexShrink:0,boxShadow:'-10px 0 30px rgba(0,0,0,0.5)'}}>
+        <div className="right-panel">
 
           {/* Panel header */}
           <div style={{padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.05)',background:'linear-gradient(to bottom, rgba(255,255,255,0.03), transparent)',display:'flex',alignItems:'center',gap:10,flexShrink:0}}>
@@ -2200,16 +2229,18 @@ export default function ChessEngine(){
         /* Responsive Mobile Layout */
         @media (max-width: 900px) {
           .hide-on-mobile { display: none !important; }
-          .top-bar { padding: 0 10px; gap: 6px; justify-content: space-between; }
-          .top-buttons { gap: 6px; }
+          /* Wrap the top bar instead of overflowing off-screen on narrow phones */
+          .top-bar { height: auto; min-height: 52px; padding: 6px 10px; gap: 6px 8px; justify-content: space-between; flex-wrap: wrap; }
+          .top-buttons { gap: 6px; flex-wrap: wrap; }
           .top-title { margin-right: 0; }
           .elo-controls { margin-left: 0; }
-          
+
           .main-layout { flex-direction: column; overflow-y: auto; }
           .board-section { padding: 10px 5px; flex: none; }
           .right-panel { width: 100%; border-left: none; border-top: 1px solid rgba(255,255,255,0.1); flex: none; height: auto; min-height: 400px; box-shadow: none; }
-          
-          .player-row { width: 100%; max-width: 600px; }
+
+          /* 642 = board cap (600) + eval bar (42) so the player rows line up with the board */
+          .player-row { width: 100%; max-width: 642px; }
           .chess-board { width: calc(100vw - 52px); height: calc(100vw - 52px); max-width: 600px; max-height: 600px; }
           .eval-bar { height: calc(100vw - 52px); max-height: 600px; }
           .app-container { overflow-y: auto !important; height: auto !important; min-height: 100vh; }
