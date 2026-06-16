@@ -321,6 +321,56 @@ const DIFFS=[
   {name:'Max',   elo:2400, skill:20, depth:6, time:10000,rand:0,   color:'#902010'},
 ];
 
+// ═══════════════════════════════════════════════════
+// AI OPPONENT ROSTER (chess.com-style characters)
+// ═══════════════════════════════════════════════════
+// style.aggression: -1(defensive) … 0(neutral) … +1(aggressive)
+//   → among near-best moves, bias toward forcing (captures/checks/advances) or quiet moves
+// style.blunderRate: 0…1, chance to pick the weakest of the MultiPV candidates (a mild inaccuracy)
+// style.openings: UCI first-move(s) the bot signs its games with when playing White (else book/engine)
+// elo flows into the existing DIFFS matcher + UCI_Elo/Skill Level pipeline unchanged → strength is reused.
+const BOTS=[
+  {id:'robin',  name:'삐약이 로빈',  avatar:'🐣', color:'#5cb85c', elo:700,
+   title:'갓 입문한 병아리', bio:'기물을 자주 흘려요. 첫 게임 상대로 딱이에요.',
+   style:{aggression:0,    blunderRate:0.28, openings:['e2e4']}},
+  {id:'foxy',   name:'여우 폭시',    avatar:'🦊', color:'#e8a040', elo:1000,
+   title:'함정의 달인',     bio:'덫을 좋아하고 가끔 무리하게 달려들어요.',
+   style:{aggression:0.6,  blunderRate:0.18, openings:['e2e4']}},
+  {id:'bruno',  name:'곰돌 브루노',  avatar:'🐻', color:'#b8c152', elo:1200,
+   title:'느긋한 수비수',   bio:'서두르지 않고 단단하게 둬요.',
+   style:{aggression:-0.6, blunderRate:0.12, openings:['d2d4']}},
+  {id:'hopper', name:'토깽 호퍼',    avatar:'🐰', color:'#e8d5b5', elo:1400,
+   title:'빠른 전개파',     bio:'기물을 재빨리 꺼내 공격을 노려요.',
+   style:{aggression:0.4,  blunderRate:0.08, openings:['e2e4']}},
+  {id:'hawk',   name:'매 호크',      avatar:'🦅', color:'#e8a040', elo:1600,
+   title:'킹 사냥꾼',       bio:'상대 킹을 향해 거침없이 돌격합니다.',
+   style:{aggression:0.9,  blunderRate:0.05, openings:['e2e4']}},
+  {id:'shelly', name:'거북 셸리',    avatar:'🐢', color:'#5cb85c', elo:1600,
+   title:'철벽 포지셔널',   bio:'같은 점수라도 스타일은 정반대! 안전 제일이에요.',
+   style:{aggression:-0.8, blunderRate:0.04, openings:['c2c4']}},
+  {id:'drake',  name:'용 드레이크',  avatar:'🐉', color:'#e07040', elo:1800,
+   title:'희생의 화신',     bio:'기물을 던져서라도 공격을 이어갑니다.',
+   style:{aggression:0.9,  blunderRate:0.03, openings:['e2e4']}},
+  {id:'sage',   name:'부엉 세이지',  avatar:'🦉', color:'#89d4f0', elo:1950,
+   title:'엔드게임 현자',   bio:'침착하고 포지셔널하게 운영해요.',
+   style:{aggression:-0.4, blunderRate:0.02, openings:['d2d4']}},
+  {id:'wally',  name:'월리 봇',      avatar:'🤖', color:'#d04040', elo:2100,
+   title:'균형잡힌 머신',   bio:'뚜렷한 약점이 없는 만능형 상대.',
+   style:{aggression:0,    blunderRate:0.01, openings:[]}},
+  {id:'magna',  name:'챔피언 마그나', avatar:'👑', color:'#902010', elo:2400,
+   title:'최강의 벽',       bio:'정확하고 무자비합니다. 행운을 빌어요.',
+   style:{aggression:0,    blunderRate:0,    openings:[]}},
+];
+const CUSTOM_BOT={id:'custom',name:'커스텀 AI',avatar:'🎚️',color:'#9aa0a6',
+  title:'직접 설정한 난이도', bio:'슬라이더로 ELO를 직접 정한 상대예요.',
+  style:{aggression:0,blunderRate:0,openings:[]}}; // elo is taken from the slider value
+const BOT_STORE_KEY='aichess_selected_bot_v1';
+function botById(id){return BOTS.find(b=>b.id===id)||null;}
+function loadInitialBot(){
+  try{const b=botById(localStorage.getItem(BOT_STORE_KEY));if(b)return b;}catch(e){}
+  return botById('bruno')||BOTS[0];
+}
+
 const W_ORD=[WQ,WR,WB,WN,WP], B_ORD=[BQ,BR,BB,BN,BP];
 
 // ═══════════════════════════════════════════════════
@@ -373,6 +423,39 @@ function uciToMove(uci,bd,col,ep){
   if(ep===t&&(p===WP||p===BP))m.ep=1;
   if((p===WP||p===BP)&&Math.abs(tr-fr)===2)m.dbl=1;
   return m;
+}
+
+// ── Personality move selection ──────────────────────────────────────────────
+// How "forcing" a move is, for aggression bias: captures + checks + advancing toward the foe.
+function moveForcefulness(bd,ep,uci,aiC){
+  const m=uciToMove(uci,bd,aiC,ep);
+  let s=0;
+  if(bd[m.t]!==E||m.ep)s+=2;                       // capture
+  if(inChk(doMv(bd,m),aiC==='w'?'b':'w'))s+=1;     // gives check
+  const fr=m.f>>3,tr=m.t>>3;                        // row 0 = rank 8 (black side)
+  const adv=aiC==='w'?(fr-tr):(tr-fr);             // >0 when moving toward the opponent
+  if(adv>0)s+=adv*0.1;
+  return s;
+}
+// Choose the bot's move among MultiPV candidates, honoring its personality.
+// cands: [{move(uci),cp}] (cp = side-to-move perspective). bestUci: engine's reported bestmove.
+// Strength is preserved: we never play a move evaluated higher than the engine intended; we only
+// trade equal-ish moves for style, or (on a blunder roll) pick a slightly weaker one.
+const PERSONALITY_TOL=40; // centipawns
+function pickByPersonality(cands,style,bestUci,bd,ep,aiC){
+  if(!cands||cands.length===0||!style)return bestUci;
+  const anchor=cands.find(c=>c.move===bestUci);
+  const anchorCp=anchor?anchor.cp:Math.max(...cands.map(c=>c.cp));
+  if(style.blunderRate>0&&cands.length>1&&Math.random()<style.blunderRate){
+    return cands.reduce((a,b)=>b.cp<a.cp?b:a).move; // weakest considered move (mild inaccuracy)
+  }
+  if(Math.abs(style.aggression)<0.05)return bestUci;
+  // never stronger than the engine's intended move, and within TOL of it
+  const near=cands.filter(c=>c.cp<=anchorCp+1&&c.cp>=anchorCp-PERSONALITY_TOL);
+  if(near.length<=1)return bestUci;
+  const scored=near.map(c=>({m:c.move,f:moveForcefulness(bd,ep,c.move,aiC)}));
+  scored.sort((a,b)=>style.aggression>0?b.f-a.f:a.f-b.f);
+  return scored[0].m;
 }
 
 // Parse principal variation (PV) from a Stockfish info line into full move objects array
@@ -486,7 +569,7 @@ export default function ChessEngine(){
   const[ep,setEp]=useState(null);
   const[cas,setCas]=useState('KQkq');
   const[over,setOver]=useState(null);
-  const[elo,setElo]=useState(1200);
+  const[elo,setElo]=useState(()=>loadInitialBot().elo);
   const[eloInput,setEloInput]=useState('');
   const[thinking,setThinking]=useState(false);
   const[last,setLast]=useState(null);
@@ -519,6 +602,8 @@ export default function ChessEngine(){
   const[puzzleSolvedEval,setPuzzleSolvedEval]=useState(null);
   const[puzzleAnalysisMode,setPuzzleAnalysisMode]=useState(false);
   const[evalGraphHover,setEvalGraphHover]=useState(null);
+  const[selectedBot,setSelectedBot]=useState(loadInitialBot);
+  const[showBotPicker,setShowBotPicker]=useState(false);
 
   const bR=useRef(board);bR.current=board;
   const tR=useRef(turn);tR.current=turn;
@@ -533,6 +618,7 @@ export default function ChessEngine(){
   const histR=useRef(hist);histR.current=hist;
   const analysisAbortRef=useRef(false);
   const soundOnRef=useRef(soundOn);soundOnRef.current=soundOn;
+  const selectedBotRef=useRef(selectedBot);selectedBotRef.current=selectedBot;
 
   // Stockfish worker refs (engine state, not React state)
   const sfWorkerRef=useRef(null);
@@ -540,6 +626,7 @@ export default function ChessEngine(){
   const sfCallbackRef=useRef(null);
   const sfEvalRef=useRef(null);
   const sfPVRef=useRef('');
+  const sfMultiPVRef=useRef(null); // {1:{move,cp},2:{...}} while a personality bot is searching, else null
   const sfLiveEvalRef=useRef(false);
   const sfAiSideRef=useRef(null);
   const sfHintModeRef=useRef(false);
@@ -562,7 +649,11 @@ export default function ChessEngine(){
         if(line==='uciok'){w.postMessage('isready');}
         if(line==='readyok'){sfReadyRef.current=true;}
         if(line.startsWith('info')){
-          if(line.includes('score')){
+          // With MultiPV>1, Stockfish emits one info line per candidate. Only the main line
+          // (multipv 1, or no multipv field) should drive the eval bar / hint PV.
+          const mpvMatch=line.match(/multipv (\d+)/);
+          const isMain=!mpvMatch||mpvMatch[1]==='1';
+          if(line.includes('score')&&isMain){
             const cp=line.match(/score cp (-?\d+)/);
             const mt=line.match(/score mate (-?\d+)/);
             let raw=null;
@@ -575,7 +666,17 @@ export default function ChessEngine(){
               }
             }
           }
-          if(line.includes(' pv ')){
+          // Collect MultiPV candidates for personality move selection (only while a bot is searching).
+          if(mpvMatch&&sfMultiPVRef.current){
+            const cp=line.match(/score cp (-?\d+)/);
+            const mt=line.match(/score mate (-?\d+)/);
+            const first=line.match(/\bpv\s+([a-h][1-8][a-h][1-8][qrbn]?)/)?.[1];
+            let val=null;
+            if(cp)val=parseInt(cp[1]);
+            else if(mt)val=parseInt(mt[1])>0?99999:-99999;
+            if(first&&val!==null)sfMultiPVRef.current[parseInt(mpvMatch[1])]={move:first,cp:val};
+          }
+          if(line.includes(' pv ')&&isMain){
             sfPVRef.current=line;
             if(sfHintModeRef.current&&sfHintCtxRef.current){
               const {board:hb,turn:ht,ep:he}=sfHintCtxRef.current;
@@ -623,6 +724,16 @@ export default function ChessEngine(){
     puzzleMoveIdxRef.current=0;
     setGameKey(k=>k+1);
   },[]);
+
+  // Pick an AI opponent from the gallery → set strength + personality, persist, start a fresh game
+  const selectBot=useCallback((bot)=>{
+    setSelectedBot(bot);
+    setElo(bot.elo);
+    setEloInput('');
+    try{localStorage.setItem(BOT_STORE_KEY,bot.id);}catch(e){}
+    setShowBotPicker(false);
+    reset();
+  },[reset]);
 
   const applyMv=useCallback((b,m,ep_,cas_,col)=>{
     const cap=b[m.t];const nb=doMv(b,m);const nc=updCas(cas_,m,b);const ne=nextEp(m);
@@ -726,6 +837,23 @@ export default function ChessEngine(){
     const currentElo=eloR.current;
     const d=DIFFS.reduce((prev,curr)=>Math.abs(curr.elo-currentElo)<Math.abs(prev.elo-currentElo)?curr:prev);
 
+    // Active opponent personality (named bots only; CUSTOM_BOT carries a neutral style)
+    const bot=selectedBotRef.current;
+    const style=bot&&bot.style;
+    const personalityActive=!!style&&(style.blunderRate>0||Math.abs(style.aggression)>=0.05);
+
+    // Opening identity: a bot signs its first move as White (engine-agnostic, runs before any search)
+    if(style&&style.openings&&style.openings.length&&aiC==='w'&&histR.current.length===0){
+      const legals=legal(b,aiC,e,c);
+      const pick=style.openings.map(u=>uciToMove(u,b,aiC,e)).find(m=>m&&legals.some(L=>L.f===m.f&&L.t===m.t));
+      if(pick){
+        setSearchInfo(`${bot.name} · Opening`);
+        applyMv(b,pick,e,c,aiC);
+        setThinking(false);
+        return;
+      }
+    }
+
     if(sfReadyRef.current&&sfWorkerRef.current){
       let cancelled=false;
       const fen=boardToFEN(b,aiC,e,c);
@@ -736,15 +864,23 @@ export default function ChessEngine(){
       const runEngine=()=>{
         if(cancelled)return;
         sfEvalRef.current=null;
+        sfMultiPVRef.current=personalityActive?{}:null;
         sfLiveEvalRef.current=true;
         sfAiSideRef.current=aiC;
         sfCallbackRef.current=(uciMove,sfEval)=>{
           sfLiveEvalRef.current=false;
+          if(sfWorkerRef.current)sfWorkerRef.current.postMessage('setoption name MultiPV value 1'); // restore for other searches
+          const cands=sfMultiPVRef.current?Object.values(sfMultiPVRef.current):null;
+          sfMultiPVRef.current=null;
           if(cancelled)return;
-          if(uciMove&&uciMove!=='(none)'){
-            const m=uciToMove(uciMove,b,aiC,e);
-            setEvalScore(sfEval!==null?(aiC==='w'?sfEval:-sfEval):null);
-            setSearchInfo(`Stockfish · ELO ${currentElo} · d${d.depth+4}`);
+          let finalUci=uciMove;
+          if(personalityActive&&cands&&cands.length)finalUci=pickByPersonality(cands,style,uciMove,b,e,aiC);
+          if(finalUci&&finalUci!=='(none)'){
+            const m=uciToMove(finalUci,b,aiC,e);
+            const chosen=cands&&cands.find(cc=>cc.move===finalUci);
+            const evalCp=chosen?chosen.cp:sfEval;
+            setEvalScore(evalCp!==null&&evalCp!==undefined?(aiC==='w'?evalCp:-evalCp):null);
+            setSearchInfo(`${bot&&bot.id!=='custom'?bot.name:'Stockfish'} · ELO ${currentElo}`);
             applyMv(b,m,e,c,aiC);
           }
           setThinking(false);
@@ -756,7 +892,7 @@ export default function ChessEngine(){
           sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
           sfWorkerRef.current.postMessage(`setoption name Skill Level value ${d.skill}`);
         }
-        
+        sfWorkerRef.current.postMessage(`setoption name MultiPV value ${personalityActive?3:1}`);
         sfWorkerRef.current.postMessage(`position fen ${fen}`);
         sfWorkerRef.current.postMessage(`go depth ${d.depth+4} movetime ${d.time}`);
       };
@@ -782,12 +918,15 @@ export default function ChessEngine(){
         cancelled=true;
         sfLiveEvalRef.current=false;
         sfCallbackRef.current=null;
-        if(sfWorkerRef.current)sfWorkerRef.current.postMessage('stop');
+        sfMultiPVRef.current=null;
+        if(sfWorkerRef.current){sfWorkerRef.current.postMessage('stop');sfWorkerRef.current.postMessage('setoption name MultiPV value 1');}
       };
     }
 
     const tid=setTimeout(()=>{
-      const result=findBestMove(b,e,c,aiC,d.depth,d.time,d.rand);
+      // Fallback engine: nudge its move noise up for blunder-prone bots (personality, best-effort)
+      const fbRand=Math.round(d.rand*(1+(style?style.blunderRate:0)*2));
+      const result=findBestMove(b,e,c,aiC,d.depth,d.time,fbRand);
       if(result&&result.move){
         setEvalScore(result.eval);
         setSearchInfo(`depth ${Math.min(result.depth||d.depth,d.depth)} · ${(nodeCount/1000).toFixed(0)}k nodes`);
@@ -815,6 +954,7 @@ export default function ChessEngine(){
     // options before moving, so this only affects the eval-bar read.
     sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
     sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+    sfWorkerRef.current.postMessage('setoption name MultiPV value 1');
     sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
     sfWorkerRef.current.postMessage(`go movetime ${LIVE_EVAL_MOVETIME_MS}`);
     // No 'stop' in cleanup: the next worker owner (AI turn / hint) issues its own
@@ -930,6 +1070,7 @@ export default function ChessEngine(){
     sfHintModeRef.current=false;
     w.postMessage('setoption name UCI_LimitStrength value false');
     w.postMessage('setoption name Skill Level value 20');
+    w.postMessage('setoption name MultiPV value 1');
     w.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
     w.postMessage('go depth 14');
     return()=>{sfCallbackRef.current=null;};
@@ -964,6 +1105,7 @@ export default function ChessEngine(){
     sfLiveEvalRef.current=true;
     sfAiSideRef.current=t;
     sfWorkerRef.current.postMessage('stop');
+    sfWorkerRef.current.postMessage('setoption name MultiPV value 1');
     sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
     sfWorkerRef.current.postMessage('go movetime 500');
     return()=>{
@@ -1056,6 +1198,7 @@ export default function ChessEngine(){
       sfWorkerRef.current.postMessage('setoption name UCI_LimitStrength value false');
       sfWorkerRef.current.postMessage('setoption name UCI_Elo value 3200');
       sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+      sfWorkerRef.current.postMessage('setoption name MultiPV value 1');
       sfWorkerRef.current.postMessage(`position fen ${boardToFEN(b,t,e,c)}`);
       sfWorkerRef.current.postMessage(`go movetime ${HINT_MOVETIME_MS}`);
     }else{
@@ -1252,6 +1395,7 @@ export default function ChessEngine(){
           if(sfCallbackRef.current===doNext){sfCallbackRef.current=null;doNext(null,sfEvalRef.current);}
         },ANALYSIS_TIMEOUT_MS);
         sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+        sfWorkerRef.current.postMessage('setoption name MultiPV value 1');
         sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
         sfWorkerRef.current.postMessage(`go depth ${ANALYSIS_DEPTH}`);
       }else{
@@ -1351,6 +1495,7 @@ export default function ChessEngine(){
             }
           },ANALYSIS_TIMEOUT_MS);
           sfWorkerRef.current.postMessage('setoption name Skill Level value 20');
+          sfWorkerRef.current.postMessage('setoption name MultiPV value 1');
           sfWorkerRef.current.postMessage(`position fen ${boardToFEN(s.board,s.turn,s.ep,s.cas)}`);
           sfWorkerRef.current.postMessage(`go depth ${ANALYSIS_DEPTH}`); // depth-only: predictable finish time
         }else{
@@ -1500,6 +1645,15 @@ export default function ChessEngine(){
     return <div style={{width:size,height:size,borderRadius:size>40?8:6,background:bg,border,display:'flex',alignItems:'center',justifyContent:'center'}}><img src={PIECE_SVG[color==='w'?WK:BK]} alt="" style={{width:imgSz,height:imgSz}}/></div>;
   };
 
+  // Emoji avatar for an AI bot (chess.com-style character)
+  const renderBotAvatar=(bot,size)=>(
+    <div style={{width:size,height:size,borderRadius:size>40?10:8,background:`${bot.color}22`,
+      border:`2px solid ${bot.color}`,display:'flex',alignItems:'center',justifyContent:'center',
+      lineHeight:1,flexShrink:0}}>
+      <span style={{fontSize:Math.round(size*0.58)}}>{bot.avatar}</span>
+    </div>
+  );
+
   const renderCap=(pieces,order,adv)=>{
     const g={};order.forEach(p=>g[p]=0);pieces.forEach(p=>g[p]=(g[p]||0)+1);
     return(<div style={{display:'flex',alignItems:'center',gap:1,minHeight:26,flexWrap:'wrap'}}>
@@ -1572,36 +1726,16 @@ export default function ChessEngine(){
         </div>
         
         <div className="elo-controls" style={{display:'flex',alignItems:'center',gap:8,marginLeft:'auto'}}>
-          <span className="hide-on-mobile" style={{fontSize:12,color:'#666'}}>난이도</span>
-          <input className="hide-on-mobile" type="range" min={600} max={2400} step={1} value={elo} onChange={e=>setElo(+e.target.value)}
-            style={{width:130,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
-          <input
-            type="number"
-            min={600} max={2400} step={1}
-            value={eloInput!==''?eloInput:elo}
-            onFocus={e=>{setEloInput(String(elo));e.target.select();}}
-            onChange={e=>{
-              const raw=e.target.value;
-              setEloInput(raw);
-              const v=parseInt(raw);
-              if(!isNaN(v)&&v>=600&&v<=2400)setElo(v);
-            }}
-            onKeyDown={e=>{
-              if(e.key==='Enter'){
-                const v=parseInt(e.target.value);
-                if(!isNaN(v)){
-                  const clamped=Math.max(600,Math.min(2400,v));
-                  setElo(clamped);
-                }
-                setEloInput('');
-                e.target.blur();
-              }
-            }}
-            onBlur={()=>setEloInput('')}
-            style={{width:62,padding:'4px 6px',background:'rgba(255,255,255,0.08)',color:d.color,border:'1px solid rgba(255,255,255,0.2)',borderRadius:5,fontSize:13,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}
-          />
-          <span className="hide-on-mobile" style={{fontSize:14,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:50}}>{d.name}</span>
-          <span style={{fontSize:11,color:'#555'}}>d{d.depth}</span>
+          <span className="hide-on-mobile" style={{fontSize:12,color:'#666'}}>상대</span>
+          <button onClick={()=>setShowBotPicker(true)} title="상대 선택"
+            style={{display:'flex',alignItems:'center',gap:8,padding:'5px 10px',background:'rgba(255,255,255,0.08)',
+              color:'#e8e0d5',border:`1px solid ${selectedBot.color}66`,borderRadius:8,cursor:'pointer',
+              fontFamily:"'DM Sans',sans-serif",fontWeight:700,fontSize:13,whiteSpace:'nowrap'}}>
+            <span style={{fontSize:18,lineHeight:1}}>{selectedBot.avatar}</span>
+            <span className="hide-on-mobile">{selectedBot.name}</span>
+            <span style={{color:selectedBot.color,fontFamily:"'Space Mono',monospace"}}>ELO {elo}</span>
+            <span style={{fontSize:10,color:'#8a8580'}}>▾</span>
+          </button>
         </div>
       </div>
 
@@ -1611,13 +1745,16 @@ export default function ChessEngine(){
         {/* ── Board section ── */}
         <div className="board-section" style={{flex:1,display:'flex',flexDirection:'column',alignItems:'center',justifyContent:'center',padding:'10px 20px'}}>
 
-          {/* Opponent row */}
+          {/* Opponent row — click to open the character gallery */}
           <div className="player-row top" style={{marginBottom:10,display:'flex',alignItems:'center',justifyContent:'space-between'}}>
-            <div style={{display:'flex',alignItems:'center',gap:10}}>
-              {renderKingAvatar(ac,46)}
+            <div onClick={()=>setShowBotPicker(true)} title="상대 선택"
+              style={{display:'flex',alignItems:'center',gap:10,cursor:'pointer',borderRadius:8,padding:'2px 4px',transition:'background 0.15s'}}
+              onMouseEnter={e=>e.currentTarget.style.background='rgba(255,255,255,0.06)'}
+              onMouseLeave={e=>e.currentTarget.style.background='transparent'}>
+              {selectedBot.id==='custom'?renderKingAvatar(ac,46):renderBotAvatar(selectedBot,46)}
               <div>
-                <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5'}}>Wally-BOT</div>
-                <div style={{fontSize:12,color:'#8a8580'}}>ELO {elo} · d{d.depth}</div>
+                <div style={{fontSize:16,fontWeight:700,color:'#e8e0d5',display:'flex',alignItems:'center',gap:6}}>{selectedBot.name}<span style={{fontSize:11,color:'#8a8580'}}>▾</span></div>
+                <div style={{fontSize:12,color:'#8a8580'}}>ELO {elo} · {selectedBot.title}</div>
               </div>
             </div>
             <div style={{display:'flex',alignItems:'center'}}>{renderCap(topCapDisp,topOrd,topAdv)}</div>
@@ -2291,8 +2428,74 @@ export default function ChessEngine(){
         </div>
       )}
 
+      {/* ── Opponent gallery (chess.com-style character picker) ── */}
+      {showBotPicker&&(
+        <div onClick={()=>setShowBotPicker(false)}
+          style={{position:'fixed',inset:0,background:'rgba(0,0,0,0.72)',zIndex:1000,display:'flex',alignItems:'center',justifyContent:'center',padding:16}}>
+          <div onClick={e=>e.stopPropagation()} className="bot-modal"
+            style={{background:'#2c2a28',borderRadius:14,boxShadow:'0 10px 40px rgba(0,0,0,0.7)',width:'min(720px,100%)',maxHeight:'90vh',display:'flex',flexDirection:'column',overflow:'hidden'}}>
+            <div style={{display:'flex',alignItems:'center',justifyContent:'space-between',padding:'16px 20px',borderBottom:'1px solid rgba(255,255,255,0.08)'}}>
+              <div>
+                <div style={{fontSize:18,fontWeight:700,color:'#e8e0d5',fontFamily:"'Space Mono',monospace"}}>♟ 상대를 선택하세요</div>
+                <div style={{fontSize:12,color:'#8a8580',marginTop:2}}>캐릭터마다 점수와 플레이 성격이 달라요</div>
+              </div>
+              <button onClick={()=>setShowBotPicker(false)}
+                style={{background:'rgba(255,255,255,0.08)',color:'#ccc',border:'1px solid rgba(255,255,255,0.14)',borderRadius:7,width:32,height:32,fontSize:16,cursor:'pointer'}}>✕</button>
+            </div>
+            <div style={{padding:16,overflowY:'auto'}}>
+              <div className="bot-grid">
+                {BOTS.map(bot=>{
+                  const sel=selectedBot.id===bot.id;
+                  return(
+                    <button key={bot.id} onClick={()=>selectBot(bot)}
+                      style={{textAlign:'left',display:'flex',flexDirection:'column',gap:6,padding:12,borderRadius:10,cursor:'pointer',
+                        background:sel?`${bot.color}1f`:'rgba(255,255,255,0.04)',
+                        border:`2px solid ${sel?bot.color:'rgba(255,255,255,0.08)'}`,transition:'all 0.15s'}}>
+                      <div style={{display:'flex',alignItems:'center',gap:10}}>
+                        {renderBotAvatar(bot,44)}
+                        <div style={{minWidth:0}}>
+                          <div style={{fontSize:15,fontWeight:700,color:'#e8e0d5',whiteSpace:'nowrap',overflow:'hidden',textOverflow:'ellipsis'}}>{bot.name}</div>
+                          <div style={{fontSize:12,color:bot.color,fontFamily:"'Space Mono',monospace",fontWeight:700}}>ELO {bot.elo}</div>
+                        </div>
+                      </div>
+                      <div style={{fontSize:12,fontWeight:700,color:'#cbb89a'}}>{bot.title}</div>
+                      <div style={{fontSize:11,color:'#8a8580',lineHeight:1.4}}>{bot.bio}</div>
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Custom ELO */}
+              <div style={{marginTop:18,padding:14,borderRadius:10,background:'rgba(255,255,255,0.04)',border:`2px solid ${selectedBot.id==='custom'?'#9aa0a6':'rgba(255,255,255,0.08)'}`}}>
+                <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:10}}>
+                  <span style={{fontSize:20}}>🎚️</span>
+                  <span style={{fontSize:14,fontWeight:700,color:'#e8e0d5'}}>커스텀 — ELO 직접 설정</span>
+                </div>
+                <div style={{display:'flex',alignItems:'center',gap:10,flexWrap:'wrap'}}>
+                  <input type="range" min={600} max={2400} step={1} value={elo}
+                    onChange={e=>{setSelectedBot(CUSTOM_BOT);setElo(+e.target.value);}}
+                    style={{flex:1,minWidth:160,appearance:'none',height:6,background:'linear-gradient(to right,#5cb85c,#e8a040,#d04040)',borderRadius:3,outline:'none',cursor:'pointer'}}/>
+                  <input type="number" min={600} max={2400} step={1}
+                    value={eloInput!==''?eloInput:elo}
+                    onFocus={e=>{setEloInput(String(elo));e.target.select();}}
+                    onChange={e=>{const raw=e.target.value;setEloInput(raw);const v=parseInt(raw);if(!isNaN(v)&&v>=600&&v<=2400){setSelectedBot(CUSTOM_BOT);setElo(v);}}}
+                    onKeyDown={e=>{if(e.key==='Enter'){const v=parseInt(e.target.value);if(!isNaN(v)){setSelectedBot(CUSTOM_BOT);setElo(Math.max(600,Math.min(2400,v)));}setEloInput('');e.target.blur();}}}
+                    onBlur={()=>setEloInput('')}
+                    style={{width:70,padding:'6px 8px',background:'rgba(255,255,255,0.08)',color:d.color,border:'1px solid rgba(255,255,255,0.2)',borderRadius:6,fontSize:14,fontFamily:"'Space Mono',monospace",fontWeight:700,textAlign:'center',outline:'none'}}/>
+                  <span style={{fontSize:13,fontWeight:700,color:d.color,fontFamily:"'Space Mono',monospace",minWidth:46}}>{d.name}</span>
+                  <button onClick={()=>{setSelectedBot(CUSTOM_BOT);try{localStorage.removeItem(BOT_STORE_KEY);}catch(err){}setShowBotPicker(false);reset();}}
+                    style={{padding:'7px 14px',background:'#e8d5b5',color:'#111',border:'none',borderRadius:7,fontWeight:700,fontSize:13,cursor:'pointer',fontFamily:"'DM Sans',sans-serif",whiteSpace:'nowrap'}}>이 난이도로 새 게임</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
       <style>{`
         @keyframes spin{to{transform:rotate(360deg)}}
+        .bot-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;}
+        @media (max-width:560px){.bot-grid{grid-template-columns:1fr;}}
         ::-webkit-scrollbar{width:5px}::-webkit-scrollbar-track{background:transparent}::-webkit-scrollbar-thumb{background:rgba(255,255,255,0.14);border-radius:3px}
         input[type=range]::-webkit-slider-thumb{appearance:none;width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer;box-shadow:0 2px 8px rgba(0,0,0,0.5)}
         input[type=range]::-moz-range-thumb{width:18px;height:18px;border-radius:50%;background:#e8d5b5;border:2px solid #262421;cursor:pointer}
